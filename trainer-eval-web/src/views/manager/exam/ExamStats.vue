@@ -1,0 +1,1 @@
+<template><div class="page-container"><h3>考试统计</h3><el-row :gutter="16"><el-col :span="12"><el-card><h4>通过率趋势</h4><el-empty description="暂无数据" /></el-card></el-col><el-col :span="12"><el-card><h4>成绩分布</h4><el-empty description="暂无数据" /></el-card></el-col></el-row></div></template>

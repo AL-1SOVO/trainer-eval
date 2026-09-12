@@ -1,0 +1,83 @@
+server:
+  port: 8080
+
+spring:
+  profiles:
+    active: dev
+  threads:
+    virtual:
+      enabled: true
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 200MB
+  ai:
+    openai:
+      api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:}}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      chat:
+        options:
+          model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+          temperature: 0.3
+          max-tokens: 4096
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  mapper-locations: classpath*:/mapper/**/*.xml
+
+jwt:
+  secret: ${JWT_SECRET:dHJhaW5lci1ldmFsLXNlY3JldC1rZXktMjAyNC1qd3Qtc2lnbmluZy1ocy0yNTY=}
+  access-token-ttl: 7200
+  refresh-token-ttl: 604800
+
+openai:
+  api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:}}
+  base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+  model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+  temperature: 0.3
+  max-tokens: 4096
+  connect-timeout: 30s
+  read-timeout: 120s
+
+agent:
+  tutor:
+    max-iterations: 6
+    history-window: 20
+    history-ttl-hours: 168
+
+app:
+  upload:
+    path: D:/trainer-eval/uploads
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: jdbc:mysql://localhost:3306/trainer_eval?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+      password:
+      timeout: 3000ms
+
+logging:
+  level:
+    com.trainereval: debug

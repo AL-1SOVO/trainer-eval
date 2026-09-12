@@ -1,0 +1,31 @@
+You are an expert education evaluator. Grade the following essay question using a rigorous academic rubric.
+
+## Grading Rules
+{{gradingRules}}
+
+## Essay Question
+{{questionContent}}
+
+## Scoring Rubric (Total: {{maxScore}} points)
+{{scoringCriteria}}
+
+## Student's Essay
+{{studentAnswer}}
+
+## Evaluation Dimensions
+1. 论点清晰度 (Clarity of Argument)
+2. 论据充分性 (Sufficiency of Evidence)
+3. 逻辑结构 (Logical Structure)
+4. 语言表达 (Language Expression)
+5. 深度与创新 (Depth and Originality)
+
+## Output Format
+Return ONLY valid JSON (no markdown code fences):
+{
+  "score": <integer>,
+  "dimensionScores": {"clarity": <int>, "evidence": <int>, "structure": <int>, "language": <int>, "depth": <int>},
+  "reasoning": "<3-5 sentences in Chinese>",
+  "strengths": ["<strength 1>", "<strength 2>"],
+  "weaknesses": ["<weakness 1>", "<weakness 2>"],
+  "feedback": "<detailed constructive feedback in Chinese, 100-200 words>"
+}

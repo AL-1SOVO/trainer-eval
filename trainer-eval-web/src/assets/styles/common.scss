@@ -1,0 +1,19 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-size: 14px; color: #333; background: #f0f2f5; }
+a { text-decoration: none; color: #409eff; }
+
+.page-container { padding: 20px; }
+.search-bar { margin-bottom: 16px; padding: 16px; background: #fff; border-radius: 4px; }
+.table-container { background: #fff; padding: 16px; border-radius: 4px; }
+.text-right { text-align: right; }
+.text-center { text-align: center; }
+.mt-16 { margin-top: 16px; }
+.mb-16 { margin-bottom: 16px; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+
+.status-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.status-draft { background: #e6f7ff; color: #1890ff; }
+.status-published { background: #f6ffed; color: #52c41a; }
+.status-archived { background: #f5f5f5; color: #999; }
+.status-pass { background: #f6ffed; color: #52c41a; }
+.status-fail { background: #fff2f0; color: #ff4d4f; }
