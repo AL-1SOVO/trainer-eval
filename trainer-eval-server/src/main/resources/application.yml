@@ -17,7 +17,11 @@ spring:
       max-request-size: 200MB
   ai:
     openai:
-      api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:}}
+      # 修复：原来默认值是空串，而 Spring AI 的 OpenAiChatAutoConfiguration 会对
+      # api-key 做 Assert.hasText → 未设置 DEEPSEEK_API_KEY 时**整个应用启动失败**
+      # （连考试等与 AI 无关的接口都不可用）。改为非空占位值：
+      # 应用可正常启动，AI 调用时才报鉴权错误。
+      api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:not-configured}}
       base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
       chat:
         options:
@@ -43,7 +47,7 @@ jwt:
   refresh-token-ttl: 604800
 
 openai:
-  api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:}}
+  api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:not-configured}}
   base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
   model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
   temperature: 0.3

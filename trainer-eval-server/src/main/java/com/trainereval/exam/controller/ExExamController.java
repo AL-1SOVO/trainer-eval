@@ -24,19 +24,19 @@ public class ExExamController {
     public R<Map<String, Object>> start(@Valid @RequestBody StartExamRequest req) { return R.ok(examService.startExam(SecurityUtils.getCurrentUserId(), req.getPaperId())); }
 
     @GetMapping("/session/{recordId}")
-    public R<Map<String, Object>> session(@PathVariable Long recordId) { return R.ok(examService.getSession(recordId)); }
+    public R<Map<String, Object>> session(@PathVariable Long recordId) { return R.ok(examService.getSession(recordId, SecurityUtils.getCurrentUserId())); }
 
     @PostMapping("/session/{recordId}/save")
-    public R<?> save(@PathVariable Long recordId, @RequestBody Map<String, Object> body) { examService.saveAnswer(recordId, Long.valueOf(body.get("questionId").toString()), String.valueOf(body.get("answer"))); return R.ok(); }
+    public R<?> save(@PathVariable Long recordId, @RequestBody Map<String, Object> body) { examService.saveAnswer(recordId, Long.valueOf(body.get("questionId").toString()), String.valueOf(body.get("answer")), SecurityUtils.getCurrentUserId()); return R.ok(); }
 
     @PostMapping("/submit")
-    public R<ExExamRecord> submit(@Valid @RequestBody SubmitExamRequest req) { return R.ok(examService.submitExam(req.getRecordId(), req.getAnswers())); }
+    public R<ExExamRecord> submit(@Valid @RequestBody SubmitExamRequest req) { return R.ok(examService.submitExam(req.getRecordId(), req.getAnswers(), SecurityUtils.getCurrentUserId())); }
 
     @GetMapping("/records/my")
     public R<PageResult<ExExamRecord>> myRecords(@RequestParam(defaultValue="1") int page, @RequestParam(defaultValue="10") int size) { return R.ok(examService.getMyRecords(SecurityUtils.getCurrentUserId(), page, size)); }
 
     @GetMapping("/records/{id}/result")
-    public R<Map<String, Object>> result(@PathVariable Long id) { return R.ok(examService.getResult(id)); }
+    public R<Map<String, Object>> result(@PathVariable Long id) { return R.ok(examService.getResult(id, SecurityUtils.getCurrentUserId())); }
 
     @GetMapping("/stats/overview") @PreAuthorize("hasRole('MANAGER')")
     public R<Map<String, Object>> overview() { return R.ok(examService.getOverviewStats()); }

@@ -7,6 +7,7 @@ import com.trainereval.exam.entity.ExExamAnswer;
 import com.trainereval.exam.entity.ExExamRecord;
 import com.trainereval.exam.mapper.ExExamAnswerMapper;
 import com.trainereval.exam.mapper.ExExamRecordMapper;
+import com.trainereval.exam.service.AsyncGradingTrigger;
 import com.trainereval.questionbank.entity.QbExamPaper;
 import com.trainereval.questionbank.entity.QbQuestion;
 import com.trainereval.questionbank.mapper.QbExamPaperMapper;
@@ -17,6 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -52,6 +54,35 @@ public class ExGradingController {
 
     @Autowired
     private SysUserMapper userMapper;
+
+    @Autowired
+    private AsyncGradingTrigger asyncGradingTrigger;
+
+    /**
+     * 新增：重新 AI 批改。
+     * 之所以必须有这个接口 —— 原实现里 AI 失败会被写成 0 分并置为 GRADED，
+     * 且没有任何重批入口，老师只能逐题手工改分（而界面还显示绿色"AI 已评分"，
+     * 根本不知道需要改）。现在把失败显式暴露为"待人工"并提供一键重批。
+     */
+    @PostMapping("/{recordId}/regrade")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> regrade(@PathVariable Long recordId) {
+        ExExamRecord record = recordMapper.selectById(recordId);
+        if (record == null) {
+            return R.error("阅卷记录不存在");
+        }
+        // 同步执行，便于调用方立即拿到结果
+        asyncGradingTrigger.regrade(recordId);
+
+        ExExamRecord updated = recordMapper.selectById(recordId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("recordId", recordId);
+        result.put("status", updated.getStatus());
+        result.put("objectiveScore", updated.getObjectiveScore());
+        result.put("subjectiveScore", updated.getSubjectiveScore());
+        result.put("totalScore", updated.getTotalScore());
+        return R.ok("重新批改完成", result);
+    }
 
     @GetMapping("/queue")
     @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")

@@ -84,7 +84,7 @@
         </div>
         <el-divider />
         <div style="font-size:12px;color:#999">已答: {{ answeredCount }} / {{ questions.length }}</div>
-        <el-button type="primary" style="margin-top:16px;width:100%" :loading="submitting" @click="handleSubmit">
+        <el-button type="primary" style="margin-top:16px;width:100%" :loading="submitting" @click="handleSubmit(false)">
           提交试卷
         </el-button>
       </div>
@@ -111,6 +111,20 @@ const remainingSec = ref(3600)
 const submitting = ref(false)
 
 let timer = null
+// 修复：用绝对截止时间计算剩余时长，避免浏览器后台节流把 60 分钟"拖长"
+const deadline = ref(0)
+let autoSubmitted = false
+
+function tick() {
+  const left = Math.max(0, Math.round((deadline.value - Date.now()) / 1000))
+  remainingSec.value = left
+  if (left <= 0 && !autoSubmitted) {
+    autoSubmitted = true
+    clearInterval(timer)
+    ElMessage.warning('考试时间已到，正在自动交卷')
+    handleSubmit(true)
+  }
+}
 
 const answeredCount = computed(() => {
   let count = 0
@@ -196,7 +210,11 @@ function parseOptions(question) {
     return {
       label,
       text,
-      value: text,
+      // 修复：这里原来是 value: text —— 把「选项全文」当作答案提交。
+      // 而题库里参考答案存的是字母（选项 ["SQL注入","定期备份"] 对应答案 "A"），
+      // 后端用字符串比较 → 真实录入的题目必然判 0 分（只有带 "A. " 前缀的种子数据能过）。
+      // 选择题统一提交字母标签；判断题的参考答案是"正确/错误"文本，保持原样。
+      value: question.questionType === 'TRUE_FALSE' ? text : label,
       display: text
     }
   })
@@ -231,14 +249,16 @@ async function autoSave(index) {
   }
 }
 
-async function handleSubmit() {
-  try {
-    await ElMessageBox.confirm('确认提交试卷吗？提交后将不能继续修改答案。', '提示', {
-      confirmButtonText: '确认提交',
-      cancelButtonText: '继续作答'
-    })
-  } catch (error) {
-    return
+async function handleSubmit(auto = false) {
+  if (!auto) {
+    try {
+      await ElMessageBox.confirm('确认提交试卷吗？提交后将不能继续修改答案。', '提示', {
+        confirmButtonText: '确认提交',
+        cancelButtonText: '继续作答'
+      })
+    } catch (error) {
+      return
+    }
   }
 
   submitting.value = true
@@ -256,10 +276,11 @@ async function handleSubmit() {
     })
 
     clearInterval(timer)
-    ElMessage.success('提交成功')
+    ElMessage.success(auto ? '考试时间已到，已自动交卷' : '提交成功')
     router.push(`/employee/exam-result/${result.id}`)
   } catch (error) {
-    ElMessage.error('提交失败')
+    // 修复：原先固定提示"提交失败"，用户看不出原因（例如超时/已交卷）
+    ElMessage.error(error?.response?.data?.message || error?.message || '提交失败')
   } finally {
     submitting.value = false
   }
@@ -273,15 +294,30 @@ onMounted(async () => {
     if (data?.recordId) recordId.value = data.recordId
     questions.value = data?.questions || []
     paperName.value = data?.paperName || ''
-    remainingSec.value = data?.remainingSec || ((data?.duration || 60) * 60)
+
+    const remaining = data?.remainingSec ?? ((data?.duration || 60) * 60)
+    remainingSec.value = remaining
+    deadline.value = Date.now() + remaining * 1000
+
+    // 修复：回填服务端已保存的作答。
+    // 原实现一律初始化成空数组，而 getSession 又不返回 userAnswer，
+    // 于是刷新页面后答案全空，交卷时会用空答案覆盖已保存答案 → 客观题全判 0。
     answers.value = new Array(questions.value.length).fill('')
     multiAnswers.value = new Array(questions.value.length).fill(null).map(() => [])
-
-    timer = setInterval(() => {
-      if (remainingSec.value > 0) {
-        remainingSec.value -= 1
+    questions.value.forEach((question, index) => {
+      const saved = question.userAnswer
+      if (saved === null || saved === undefined || saved === '') return
+      if (question.questionType === 'MULTI_CHOICE') {
+        multiAnswers.value[index] = String(saved)
+          .split(',')
+          .map(item => item.trim())
+          .filter(Boolean)
+      } else {
+        answers.value[index] = String(saved)
       }
-    }, 1000)
+    })
+
+    timer = setInterval(tick, 1000)
   } catch (error) {
     ElMessage.error('加载试卷失败')
     router.back()

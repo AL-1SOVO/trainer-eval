@@ -44,7 +44,9 @@ public class AiGradingServiceImpl implements AiGradingService {
         GradeResult defaultResult = new GradeResult();
         defaultResult.setScore(0);
         defaultResult.setReasoning("AI grading failed");
-        defaultResult.setFeedback("系统评分异常，请联系管理员");
+        defaultResult.setFeedback("AI 批改未成功，等待人工评分");
+        // 标记为失败：调用方据此避免把 0 分当成合法成绩写库
+        defaultResult.setFailed(true);
 
         ExExamRecord record = examRecordMapper.selectById(answer.getRecordId());
         if (record == null) {

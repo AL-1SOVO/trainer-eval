@@ -21,7 +21,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -96,7 +98,26 @@ public class AiErrorAnalysisServiceImpl implements AiErrorAnalysisService {
 
             Object suggestedTopicsObj = parsed.get("suggestedTopics");
             if (suggestedTopicsObj != null) {
-                analysis.setRelatedMaterialIds(String.join(",", suggestedTopicsObj.toString().replaceAll("[\\[\\]\"]", "").split(",")));
+                // 修复：related_material_ids 是 MySQL JSON 列，原实现写的是
+                // "1, 2, 3" 这种逗号串 → MySQL 直接报 ERROR 3141 Invalid JSON text，
+                // 异常被下面的 catch 吞掉并回退成"未能生成错误分析"的默认文案。
+                // 后果是"AI 分析越成功（真的返回了 suggestedTopics），越会被丢弃"。
+                // 现在统一序列化为合法 JSON 数组。
+                List<String> topics;
+                if (suggestedTopicsObj instanceof List<?> list) {
+                    topics = list.stream()
+                            .filter(java.util.Objects::nonNull)
+                            .map(Object::toString)
+                            .map(String::trim)
+                            .filter(s -> !s.isEmpty())
+                            .collect(Collectors.toList());
+                } else {
+                    topics = Arrays.stream(suggestedTopicsObj.toString().replaceAll("[\\[\\]\"]", "").split(","))
+                            .map(String::trim)
+                            .filter(s -> !s.isEmpty())
+                            .collect(Collectors.toList());
+                }
+                analysis.setRelatedMaterialIds(objectMapper.writeValueAsString(topics));
             }
 
             saveAnalysis(analysis);

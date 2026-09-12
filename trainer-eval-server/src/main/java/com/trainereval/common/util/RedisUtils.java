@@ -30,4 +30,10 @@ public class RedisUtils {
     public void expire(String key, long timeout, TimeUnit unit) {
         redisTemplate.expire(key, timeout, unit);
     }
+
+    /** 原子自增；用于"会话代次"这类需要并发安全的计数器。 */
+    public long increment(String key) {
+        Long value = redisTemplate.opsForValue().increment(key);
+        return value != null ? value : 0L;
+    }
 }

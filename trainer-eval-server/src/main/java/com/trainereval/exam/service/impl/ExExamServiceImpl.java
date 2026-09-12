@@ -4,8 +4,11 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.trainereval.common.exception.BusinessException;
 import com.trainereval.common.exception.ErrorCode;
+import com.trainereval.common.util.SecurityUtils;
 import com.trainereval.exam.service.AsyncGradingTrigger;
 import com.trainereval.common.result.PageResult;
 import com.trainereval.exam.dto.AnswerDTO;
@@ -22,6 +25,7 @@ import com.trainereval.questionbank.entity.QbPaperQuestion;
 import com.trainereval.questionbank.mapper.QbExamPaperMapper;
 import com.trainereval.questionbank.mapper.QbQuestionMapper;
 import com.trainereval.questionbank.mapper.QbPaperQuestionMapper;
+import com.trainereval.security.LoginUser;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -32,6 +36,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -46,8 +52,11 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
     @Autowired private QbPaperQuestionMapper paperQuestionMapper;
     @Autowired(required = false) private com.trainereval.ai.service.AiErrorAnalysisService aiErrorAnalysisService;
     @Autowired private AsyncGradingTrigger asyncGradingTrigger;
+    @Autowired private ObjectMapper objectMapper;
 
     private static final Set<String> OBJECTIVE_TYPES = Set.of("SINGLE_CHOICE", "MULTI_CHOICE", "TRUE_FALSE");
+    /** 匹配 "A." / "A、" / "A:" / "A)" 形式的选项前缀。 */
+    private static final Pattern OPTION_PREFIX = Pattern.compile("^\\s*([A-Za-z])\\s*[.、:：)）]\\s*(.*)$");
 
     @Override
     public List<Map<String, Object>> getAvailablePapers(Long userId) {
@@ -95,7 +104,7 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
                 .last("LIMIT 1");
         ExExamRecord existingRecord = examRecordMapper.selectOne(progressWrapper);
         if (existingRecord != null) {
-            return getSession(existingRecord.getId());
+            return getSession(existingRecord.getId(), userId);
         }
 
         LambdaQueryWrapper<ExExamRecord> rw = new LambdaQueryWrapper<>();
@@ -159,9 +168,8 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
     }
 
     @Override
-    public Map<String, Object> getSession(Long recordId) {
-        ExExamRecord record = baseMapper.selectById(recordId);
-        if (record == null) throw new BusinessException(ErrorCode.NOT_FOUND);
+    public Map<String, Object> getSession(Long recordId, Long userId) {
+        ExExamRecord record = requireAccessibleRecord(recordId, userId);
         QbExamPaper paper = paperMapper.selectById(record.getPaperId());
 
         List<ExExamAnswer> answers = examAnswerMapper.selectByRecordId(recordId);
@@ -173,6 +181,9 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
             m.put("questionContent", a.getQuestionContent());
             m.put("options", a.getQuestionOptions());
             m.put("questionScore", a.getQuestionScore());
+            // 修复：回填已保存的作答。原实现不返回 userAnswer，导致刷新页面后
+            // 前端答案全空，交卷时用空答案覆盖服务端已保存的答案（数据被销毁）。
+            m.put("userAnswer", a.getUserAnswer());
             qList.add(m);
         }
 
@@ -190,9 +201,21 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
 
     @Override
     @Transactional
-    public void saveAnswer(Long recordId, Long questionId, String userAnswer) {
-        ExExamRecord record = baseMapper.selectById(recordId);
-        if (record == null || !"IN_PROGRESS".equals(record.getStatus())) return;
+    public void saveAnswer(Long recordId, Long questionId, String userAnswer, Long userId) {
+        ExExamRecord record = requireOwnRecord(recordId, userId);
+        // 修复：原实现在状态异常时静默 return（前端仍收到成功），属静默丢数据
+        if (!"IN_PROGRESS".equals(record.getStatus())) {
+            throw new BusinessException(ErrorCode.EXAM_NOT_IN_PROGRESS);
+        }
+        // 修复：超时后不再接受新的作答，避免超时后继续答题；
+        // 超时前已保存的答案仍然可用于交卷（见 submitExam）
+        QbExamPaper paper = paperMapper.selectById(record.getPaperId());
+        if (paper != null && paper.getDuration() != null) {
+            long elapsed = java.time.Duration.between(record.getStartTime(), LocalDateTime.now()).toMinutes();
+            if (elapsed > paper.getDuration()) {
+                throw new BusinessException(ErrorCode.EXAM_TIME_EXCEEDED);
+            }
+        }
 
         LambdaUpdateWrapper<ExExamAnswer> uw = new LambdaUpdateWrapper<>();
         uw.eq(ExExamAnswer::getRecordId, recordId).eq(ExExamAnswer::getQuestionId, questionId)
@@ -202,18 +225,37 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
 
     @Override
     @Transactional
-    public ExExamRecord submitExam(Long recordId, List<AnswerDTO> answers) {
-        ExExamRecord record = baseMapper.selectById(recordId);
-        if (record == null) throw new BusinessException(ErrorCode.EXAM_NOT_FOUND);
+    public ExExamRecord submitExam(Long recordId, List<AnswerDTO> answers, Long userId) {
+        ExExamRecord record = requireOwnRecord(recordId, userId);
         if (!"IN_PROGRESS".equals(record.getStatus())) throw new BusinessException(ErrorCode.EXAM_ALREADY_SUBMITTED);
 
         QbExamPaper paper = paperMapper.selectById(record.getPaperId());
         long elapsed = java.time.Duration.between(record.getStartTime(), LocalDateTime.now()).toMinutes();
-        if (paper != null && elapsed > paper.getDuration()) throw new BusinessException(ErrorCode.EXAM_TIME_EXCEEDED);
+        boolean expired = paper != null && paper.getDuration() != null && elapsed > paper.getDuration();
 
-        // Save answers
-        if (answers != null) {
+        List<ExExamAnswer> answerList = examAnswerMapper.selectByRecordId(recordId);
+        Map<Long, ExExamAnswer> existing = new HashMap<>();
+        for (ExExamAnswer a : answerList) {
+            existing.put(a.getQuestionId(), a);
+        }
+
+        // 修复：原实现在超时后直接抛 EXAM_TIME_EXCEEDED 拒绝交卷，而 startExam 又会
+        // 一直返回这条 IN_PROGRESS 记录 → 考试永久卡死且消耗重考次数。
+        // 现在改为：超时仍可交卷，但按服务端已保存的答案结算（忽略请求体，防超时后补答）。
+        if (expired) {
+            log.warn("考试超时提交，按服务端已保存答案结算 record={} elapsed={}min duration={}min",
+                    recordId, elapsed, paper == null ? null : paper.getDuration());
+        } else if (answers != null) {
             for (AnswerDTO dto : answers) {
+                if (dto == null || dto.getQuestionId() == null || dto.getUserAnswer() == null) continue;
+                ExExamAnswer prev = existing.get(dto.getQuestionId());
+                String prevVal = prev == null ? null : prev.getUserAnswer();
+                // 修复：不允许用空答案覆盖服务端已保存的非空答案。
+                // 刷新页面后前端答题状态为空，原实现会无条件覆盖 → 客观题全部判 0。
+                if (dto.getUserAnswer().isBlank() && prevVal != null && !prevVal.isBlank()) {
+                    log.warn("忽略空答案覆盖 record={} question={}", recordId, dto.getQuestionId());
+                    continue;
+                }
                 LambdaUpdateWrapper<ExExamAnswer> uw = new LambdaUpdateWrapper<>();
                 uw.eq(ExExamAnswer::getRecordId, recordId).eq(ExExamAnswer::getQuestionId, dto.getQuestionId())
                   .set(ExExamAnswer::getUserAnswer, dto.getUserAnswer());
@@ -222,13 +264,14 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
         }
 
         // Auto-grade objective questions
-        List<ExExamAnswer> answerList = examAnswerMapper.selectByRecordId(recordId);
+        answerList = examAnswerMapper.selectByRecordId(recordId);
         int objectiveScore = 0;
         for (ExExamAnswer ans : answerList) {
             if (OBJECTIVE_TYPES.contains(ans.getQuestionType())) {
                 QbQuestion q = questionMapper.selectById(ans.getQuestionId());
                 if (q != null) {
-                    boolean correct = isAnswerCorrect(ans.getUserAnswer(), q.getReferenceAnswer(), ans.getQuestionType());
+                    boolean correct = isAnswerCorrect(ans.getUserAnswer(), q.getReferenceAnswer(),
+                            ans.getQuestionType(), q.getOptions());
                     int isCorrect = correct ? 1 : 0;
                     BigDecimal awardedScore = correct ? ans.getQuestionScore() : BigDecimal.ZERO;
 
@@ -265,20 +308,135 @@ public class ExExamServiceImpl extends ServiceImpl<ExExamRecordMapper, ExExamRec
         return baseMapper.selectById(recordId);
     }
 
-    private boolean isAnswerCorrect(String userAnswer, String referenceAnswer, String questionType) {
-        if (userAnswer == null || referenceAnswer == null) return false;
-        if ("MULTI_CHOICE".equals(questionType)) {
-            Set<String> uSet = new HashSet<>(Arrays.asList(userAnswer.replaceAll("[,\\s]+", "").split("")));
-            Set<String> rSet = new HashSet<>(Arrays.asList(referenceAnswer.replaceAll("[,\\s]+", "").split("")));
-            return uSet.equals(rSet);
+    /** 当前登录者是否为阅卷方/管理员（可访问他人考试数据）。 */
+    private boolean isGraderOrAdmin() {
+        LoginUser current = SecurityUtils.getCurrentUser();
+        if (current == null || current.getRoles() == null) return false;
+        return current.getRoles().stream()
+                .anyMatch(r -> r != null && (r.endsWith("TRAINER") || r.endsWith("MANAGER")));
+    }
+
+    /** 仅允许本人（考生本人答题/交卷）。 */
+    private ExExamRecord requireOwnRecord(Long recordId, Long userId) {
+        ExExamRecord record = baseMapper.selectById(recordId);
+        if (record == null) throw new BusinessException(ErrorCode.NOT_FOUND);
+        if (userId == null || !userId.equals(record.getUserId())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
         }
-        return userAnswer.trim().equalsIgnoreCase(referenceAnswer.trim());
+        return record;
+    }
+
+    /** 本人或阅卷方/管理员。 */
+    private ExExamRecord requireAccessibleRecord(Long recordId, Long userId) {
+        ExExamRecord record = baseMapper.selectById(recordId);
+        if (record == null) throw new BusinessException(ErrorCode.NOT_FOUND);
+        boolean owner = userId != null && userId.equals(record.getUserId());
+        if (!owner && !isGraderOrAdmin()) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return record;
+    }
+
+    /**
+     * 修复：客观题判分原本只做 equalsIgnoreCase / 按字符拆集合，
+     * 而题库里"选项"存纯文本、"参考答案"存字母（如选项 ["SQL注入","定期备份"] 对应答案 "A"），
+     * 前端又把选项全文当答案提交 → 真实录入的题目必然判错（只有带 "A. " 前缀的种子数据能过）。
+     * 现在统一归一化为"字母标签集合"后再比较，兼容两种录入约定。
+     */
+    private boolean isAnswerCorrect(String userAnswer, String referenceAnswer,
+                                    String questionType, String optionsJson) {
+        if (userAnswer == null || referenceAnswer == null) return false;
+        String u = normalizeAnswer(userAnswer, questionType, optionsJson);
+        String r = normalizeAnswer(referenceAnswer, questionType, optionsJson);
+        if (u == null || r == null) return false;
+        return u.equals(r);
+    }
+
+    private String normalizeAnswer(String answer, String questionType, String optionsJson) {
+        if (answer == null) return null;
+        String a = answer.trim();
+        if (a.isEmpty()) return "";
+
+        // 判断题的参考答案是"正确/错误"这类文本，不做标签映射
+        if ("TRUE_FALSE".equals(questionType)) {
+            return a.toLowerCase();
+        }
+        if (!"SINGLE_CHOICE".equals(questionType) && !"MULTI_CHOICE".equals(questionType)) {
+            return a;
+        }
+
+        List<String[]> entries = parseOptionEntries(optionsJson);
+        List<String> labels = Arrays.stream(a.split("[,\\s、]+"))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(t -> resolveToLabel(t, entries))
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList());
+        if (labels.isEmpty()) return "";
+        return String.join(",", labels);
+    }
+
+    /** 解析 options JSON，返回 [标签, 文本] 列表；兼容数组元素为字符串或对象。 */
+    private List<String[]> parseOptionEntries(String optionsJson) {
+        List<String[]> entries = new ArrayList<>();
+        if (optionsJson == null || optionsJson.isBlank()) return entries;
+        try {
+            JsonNode arr = objectMapper.readTree(optionsJson);
+            if (!arr.isArray()) return entries;
+            int i = 0;
+            for (JsonNode node : arr) {
+                String raw;
+                String label;
+                if (node.isObject()) {
+                    raw = node.hasNonNull("text") ? node.get("text").asText()
+                            : node.path("value").asText("");
+                    label = node.hasNonNull("label") ? node.get("label").asText()
+                            : String.valueOf((char) ('A' + i));
+                } else {
+                    raw = node.asText("");
+                    label = String.valueOf((char) ('A' + i));
+                }
+                String text = raw == null ? "" : raw.trim();
+                // 形如 "A. 网络钓鱼" → 拆出标签与正文
+                Matcher m = OPTION_PREFIX.matcher(text);
+                if (m.matches()) {
+                    label = m.group(1).toUpperCase();
+                    text = m.group(2).trim();
+                }
+                entries.add(new String[]{label, text});
+                i++;
+            }
+        } catch (Exception e) {
+            log.debug("解析选项 JSON 失败，降级为纯文本比较: {}", e.getMessage());
+        }
+        return entries;
+    }
+
+    /** 把 "A" / "a" / "A." / 选项全文 统一映射为字母标签。 */
+    private String resolveToLabel(String token, List<String[]> entries) {
+        String t = token.trim();
+        if (t.isEmpty()) return "";
+        if (t.length() == 1 && Character.isLetter(t.charAt(0))) {
+            return t.toUpperCase();
+        }
+        Matcher m = OPTION_PREFIX.matcher(t);
+        if (m.find()) {
+            return m.group(1).toUpperCase();
+        }
+        for (String[] entry : entries) {
+            if (entry[1].equalsIgnoreCase(t)) {
+                return entry[0];
+            }
+        }
+        return t.toUpperCase();
     }
 
     @Override
-    public Map<String, Object> getResult(Long recordId) {
-        ExExamRecord record = baseMapper.selectById(recordId);
-        if (record == null) throw new BusinessException(ErrorCode.NOT_FOUND);
+    public Map<String, Object> getResult(Long recordId, Long userId) {
+        // 修复：原实现只按 id 查、不校验归属，任何登录用户都能读他人答卷；
+        // 且本接口会返回每题 referenceAnswer → 考生开考后即可拿到全部答案。
+        ExExamRecord record = requireAccessibleRecord(recordId, userId);
         QbExamPaper paper = paperMapper.selectById(record.getPaperId());
         List<ExExamAnswer> answers = examAnswerMapper.selectByRecordId(recordId);
 

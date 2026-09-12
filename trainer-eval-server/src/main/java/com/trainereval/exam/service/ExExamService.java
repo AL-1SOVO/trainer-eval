@@ -10,10 +10,10 @@ import java.util.Map;
 public interface ExExamService {
     List<Map<String, Object>> getAvailablePapers(Long userId);
     Map<String, Object> startExam(Long userId, Long paperId);
-    Map<String, Object> getSession(Long recordId);
-    void saveAnswer(Long recordId, Long questionId, String answer);
-    ExExamRecord submitExam(Long recordId, List<AnswerDTO> answers);
-    Map<String, Object> getResult(Long recordId);
+    Map<String, Object> getSession(Long recordId, Long userId);
+    void saveAnswer(Long recordId, Long questionId, String answer, Long userId);
+    ExExamRecord submitExam(Long recordId, List<AnswerDTO> answers, Long userId);
+    Map<String, Object> getResult(Long recordId, Long userId);
     PageResult<ExExamRecord> getMyRecords(Long userId, int page, int size);
     PageResult<ExExamRecord> getAllRecords(RecordQuery query);
     Map<String, Object> getOverviewStats();

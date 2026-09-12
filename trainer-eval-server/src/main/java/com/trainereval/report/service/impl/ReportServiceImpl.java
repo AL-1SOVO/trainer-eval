@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.trainereval.common.result.PageResult;
+import com.trainereval.common.util.SecurityUtils;
 import com.trainereval.report.dto.ReportRequest;
 import com.trainereval.report.entity.RptExportLog;
 import com.trainereval.report.mapper.RptExportLogMapper;
@@ -70,21 +71,32 @@ public class ReportServiceImpl implements ReportService {
         return PageResult.of(result.getRecords(), result.getTotal(), result.getCurrent(), result.getSize());
     }
 
-    @Override
-    public RptExportLog getExportLog(Long logId) {
+    /**
+     * 修复：getExportLog / downloadFile / deleteReport 原先只按主键 selectById，
+     * 从不把 logEntry.userId 与当前登录者比对 —— 任意登录用户（含 ROLE_EMPLOYEE）
+     * 都能按 id 遍历下载或删除他人的报表文件。对照 getHistory 里的 eq(userId)
+     * 可见这属于漏写。现在统一在此强制属主校验。
+     */
+    private RptExportLog requireOwnLog(Long logId) {
         RptExportLog logEntry = exportLogMapper.selectById(logId);
         if (logEntry == null) {
             throw new RuntimeException("导出记录不存在");
+        }
+        Long me = SecurityUtils.getCurrentUserId();
+        if (me == null || !me.equals(logEntry.getUserId())) {
+            throw new RuntimeException("无权访问他人的报表");
         }
         return logEntry;
     }
 
     @Override
+    public RptExportLog getExportLog(Long logId) {
+        return requireOwnLog(logId);
+    }
+
+    @Override
     public byte[] downloadFile(Long logId) {
-        RptExportLog logEntry = exportLogMapper.selectById(logId);
-        if (logEntry == null) {
-            throw new RuntimeException("导出记录不存在");
-        }
+        RptExportLog logEntry = requireOwnLog(logId);
         if (!RptExportLog.STATUS_COMPLETED.equals(logEntry.getStatus())) {
             throw new RuntimeException("报告尚未生成完成");
         }
@@ -99,10 +111,7 @@ public class ReportServiceImpl implements ReportService {
     @Override
     @Transactional
     public void deleteReport(Long logId) {
-        RptExportLog logEntry = exportLogMapper.selectById(logId);
-        if (logEntry == null) {
-            throw new RuntimeException("导出记录不存在");
-        }
+        RptExportLog logEntry = requireOwnLog(logId);
         if (logEntry.getFilePath() != null) {
             try {
                 Files.deleteIfExists(Paths.get(logEntry.getFilePath()));
