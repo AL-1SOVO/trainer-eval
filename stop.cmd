@@ -1,10 +1,17 @@
 @echo off
 rem ============================================================
-rem  停止本项目服务（双击即可运行）
+rem  Trainer-Eval stop script (double-click to run)
+rem
+rem  NOTE: keep this file ASCII-ONLY - see the note in start.cmd.
+rem  Kills the process trees listening on 8080 / 5173.
 rem ============================================================
 setlocal
 cd /d "%~dp0"
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop.ps1" %*
+set "EXITCODE=%ERRORLEVEL%"
+
 echo.
 pause
-endlocal
+rem endlocal + exit on one line so %EXITCODE% is expanded before endlocal runs.
+endlocal & exit /b %EXITCODE%

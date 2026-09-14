@@ -110,6 +110,7 @@ function Stop-Started {
     }
     $script:StartedProcesses = @()
 }
+$script:Failed = $false
 
 # ---------------------------------------------------------------- 0. 配置与密钥
 Write-Title "0. 环境配置"
@@ -447,7 +448,16 @@ try {
 catch {
     Write-Host ""
     Write-Err $_.Exception.Message
+    Write-Host ""
+    Write-Host "  本窗口会保留，可向上滚动查看完整错误信息。" -ForegroundColor Yellow
+    $script:Failed = $true
 }
 finally {
     Stop-Started
 }
+
+# 必须显式设置退出码。否则被 try/catch 捕获的异常会以退出码 0 结束：
+# 调用方（start.cmd / CI）会误判为成功，双击运行时窗口也会立刻关闭、
+# 错误信息一闪而过 —— 这正是"窗口一闪而过"的原因之一。
+if ($script:Failed) { exit 1 }
+exit 0
