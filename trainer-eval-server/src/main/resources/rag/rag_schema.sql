@@ -53,6 +53,9 @@ CREATE TABLE rag_golden_item (
 DROP TABLE IF EXISTS rag_eval_run;
 CREATE TABLE rag_eval_run (
     id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    -- 被评测的策略：CHAIN（现行链路）/ LIKE_BASELINE（改造前基线）。
+    -- 分开留档才能做"基线 vs 优化"的横向对比。
+    strategy     VARCHAR(32)  NOT NULL DEFAULT 'CHAIN',
     top_k        INT          NOT NULL,
     item_count   INT          NOT NULL,
     hit_rate     DECIMAL(5,4) NOT NULL DEFAULT 0,
@@ -60,8 +63,13 @@ CREATE TABLE rag_eval_run (
     mrr          DECIMAL(5,4) NOT NULL DEFAULT 0,
     misses       JSON,
     latency_ms   INT          NOT NULL DEFAULT 0,
-    create_time  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    create_time  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    KEY idx_eval_strategy_time (strategy, create_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 已有库的增量迁移（新建库时上面的定义已含 strategy，可忽略本段）：
+--   ALTER TABLE rag_eval_run ADD COLUMN strategy VARCHAR(32) NOT NULL DEFAULT 'CHAIN' AFTER id;
+--   ALTER TABLE rag_eval_run ADD KEY idx_eval_strategy_time (strategy, create_time);
 
 -- ---------- 5. Agent 消息表（若不存在则创建）----------
 CREATE TABLE IF NOT EXISTS agent_message (

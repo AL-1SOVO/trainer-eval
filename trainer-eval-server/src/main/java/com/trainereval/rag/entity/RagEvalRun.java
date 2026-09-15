@@ -15,6 +15,8 @@ public class RagEvalRun {
 
     @TableId(type = IdType.AUTO)
     private Long id;
+    /** 被评测的策略：CHAIN（现行检索链路）或 LIKE_BASELINE（改造前的 SQL LIKE 基线）。 */
+    private String strategy;
     private Integer topK;
     private Integer itemCount;
     /** 至少命中 1 条期望资料的题目比例。 */

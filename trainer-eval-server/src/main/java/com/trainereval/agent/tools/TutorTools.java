@@ -11,7 +11,7 @@ import com.trainereval.questionbank.mapper.QbQuestionMapper;
 import com.trainereval.rag.dto.RetrievalHit;
 import com.trainereval.rag.entity.RagChunk;
 import com.trainereval.rag.mapper.RagChunkMapper;
-import com.trainereval.rag.service.RetrievalService;
+import com.trainereval.rag.service.RagRetrievalFacade;
 import com.trainereval.training.entity.TraChapter;
 import com.trainereval.training.entity.TraCourse;
 import com.trainereval.training.entity.TraEnrollment;
@@ -49,7 +49,13 @@ public class TutorTools {
     private final TraCourseMapper courseMapper;
     private final TraEnrollmentMapper enrollmentMapper;
     private final RagChunkMapper chunkMapper;
-    private final RetrievalService retrievalService;
+    private final RagRetrievalFacade retrievalFacade;
+
+    /**
+     * 本次请求内命中的引用，供 AgentChatService 通过 SSE 的 citation 事件推给前端。
+     * 每个请求新建一个 TutorTools 实例，因此这里的可变状态天然是请求隔离的。
+     */
+    private final List<Map<String, Object>> citations = new ArrayList<>();
 
     public TutorTools(Long userId, String sessionId, ObjectMapper objectMapper,
                       ExExamRecordMapper examRecordMapper,
@@ -60,7 +66,7 @@ public class TutorTools {
                       TraCourseMapper courseMapper,
                       TraEnrollmentMapper enrollmentMapper,
                       RagChunkMapper chunkMapper,
-                      RetrievalService retrievalService) {
+                      RagRetrievalFacade retrievalFacade) {
         this.userId = userId;
         this.sessionId = sessionId;
         this.objectMapper = objectMapper;
@@ -72,7 +78,12 @@ public class TutorTools {
         this.courseMapper = courseMapper;
         this.enrollmentMapper = enrollmentMapper;
         this.chunkMapper = chunkMapper;
-        this.retrievalService = retrievalService;
+        this.retrievalFacade = retrievalFacade;
+    }
+
+    /** 供 AgentChatService 读取本次请求累积的引用。 */
+    public List<Map<String, Object>> getCitations() {
+        return citations;
     }
 
     @Tool(description = "查询当前用户最近10次考试成绩记录，包含试卷名、客观分、主观分、总分和状态")
@@ -143,7 +154,8 @@ public class TutorTools {
 
     @Tool(description = """
             检索课程培训资料，返回与问题最相关的资料片段及其引用编号。
-            采用"ngram 全文检索 + 子串匹配"混合召回后用 RRF 融合排名，结果已按相关度排序。
+            检索由独立的知识库服务完成（混合召回 + 重排），服务不可用时会自动降级为本地检索，
+            降级情况会在 retrievalBackend / degraded 字段中标明。
             回答时必须引用返回的 citation 编号（形如 M12#0），不要编造资料内容。
             """)
     public String searchCourseMaterials(
@@ -152,18 +164,26 @@ public class TutorTools {
         if (keyword == null || keyword.isBlank()) {
             return toJson(Map.of("materials", List.of(), "note", "关键词为空"));
         }
-        List<RetrievalHit> hits = retrievalService.retrieve(userId, sessionId, keyword, courseId, 5);
-        if (hits.isEmpty()) {
-            // 明确区分"没检索到"与"知识库里没有"：这里是前者，交给模型如实告知学生
-            return toJson(Map.of(
-                    "materials", List.of(),
-                    "note", "未在课程资料中检索到相关内容。可能是该知识点尚未上传资料，请如实告知学生，不要编造。"));
+        // 走检索门面：MimirQ → 本地混合 → 子串兜底；权限裁剪对两条路径同时生效
+        RagRetrievalFacade.RagResult result = retrievalFacade.search(userId, sessionId, keyword, courseId, 5);
+
+        if (result.isEmpty()) {
+            // 明确区分"没检索到"与"知识库里没有"：交给模型如实告知学生，不要编造
+            Map<String, Object> empty = new LinkedHashMap<>();
+            empty.put("materials", List.of());
+            empty.put("retrievalBackend", result.backend());
+            empty.put("degraded", result.degraded());
+            empty.put("note", result.note() != null ? result.note()
+                    : "未在课程资料中检索到相关内容。可能是该知识点尚未上传资料，请如实告知学生，不要编造。");
+            return toJson(empty);
         }
+
         List<Map<String, Object>> items = new ArrayList<>();
-        for (RetrievalHit hit : hits) {
+        for (RetrievalHit hit : result.hits()) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("citation", hit.citation());
             item.put("materialId", hit.materialId());
+            item.put("courseId", hit.courseId());
             item.put("title", hit.title());
             item.put("courseName", hit.courseName());
             item.put("chapterTitle", hit.chapterTitle());
@@ -171,8 +191,29 @@ public class TutorTools {
             item.put("relevance", Math.round(hit.score() * 10000) / 10000.0);
             item.put("matchedBy", hit.channels());
             items.add(item);
+
+            // 累积到本次请求的引用列表，供 SSE 的 citation 事件推给前端渲染"参考来源"
+            Map<String, Object> citation = new LinkedHashMap<>();
+            citation.put("citation", hit.citation());
+            citation.put("materialId", hit.materialId());
+            citation.put("courseId", hit.courseId());
+            citation.put("chapterId", hit.chapterId());
+            citation.put("title", hit.title());
+            citation.put("courseName", hit.courseName());
+            citation.put("chapterTitle", hit.chapterTitle());
+            citation.put("excerpt", hit.snippet());
+            citation.put("score", Math.round(hit.score() * 10000) / 10000.0);
+            citations.add(citation);
         }
-        return toJson(Map.of("materials", items));
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("materials", items);
+        payload.put("retrievalBackend", result.backend());
+        payload.put("degraded", result.degraded());
+        if (result.note() != null) {
+            payload.put("note", result.note() + "（回答中无需向学生解释技术细节）");
+        }
+        return toJson(payload);
     }
 
     @Tool(description = """

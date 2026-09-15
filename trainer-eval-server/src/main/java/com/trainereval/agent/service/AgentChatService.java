@@ -10,7 +10,7 @@ import com.trainereval.exam.mapper.ExWrongAnswerAnalysisMapper;
 import com.trainereval.questionbank.mapper.QbQuestionMapper;
 import com.trainereval.rag.mapper.RagChunkMapper;
 import com.trainereval.rag.service.AgentGuard;
-import com.trainereval.rag.service.RetrievalService;
+import com.trainereval.rag.service.RagRetrievalFacade;
 import com.trainereval.training.mapper.TraChapterMapper;
 import com.trainereval.training.mapper.TraCourseMapper;
 import com.trainereval.training.mapper.TraEnrollmentMapper;
@@ -91,7 +91,7 @@ public class AgentChatService {
     @Autowired
     private RagChunkMapper ragChunkMapper;
     @Autowired
-    private RetrievalService retrievalService;
+    private RagRetrievalFacade retrievalFacade;
     @Autowired
     private AgentGuard guard;
 
@@ -117,7 +117,7 @@ public class AgentChatService {
             TutorTools tools = new TutorTools(userId, sessionId, objectMapper,
                     examRecordMapper, wrongAnswerMapper, questionMapper,
                     materialMapper, chapterMapper, courseMapper,
-                    enrollmentMapper, ragChunkMapper, retrievalService);
+                    enrollmentMapper, ragChunkMapper, retrievalFacade);
 
             OpenAiChatOptions toolOptions = OpenAiChatOptions.builder()
                     .toolCallbacks(ToolCallbacks.from(tools))
@@ -174,6 +174,12 @@ public class AgentChatService {
                 send(emitter, "error", Map.of("message", "工具调用次数超出上限，请缩小问题范围后重试"));
                 emitter.complete();
                 return;
+            }
+
+            // 把本次检索命中的引用推给前端，用于渲染"参考来源"卡片（可溯源、可审计）
+            List<Map<String, Object>> citations = tools.getCitations();
+            if (!citations.isEmpty()) {
+                send(emitter, "citation", Map.of("sources", citations));
             }
 
             // 循环里最后一次响应即最终回答（已确认不含工具调用）。

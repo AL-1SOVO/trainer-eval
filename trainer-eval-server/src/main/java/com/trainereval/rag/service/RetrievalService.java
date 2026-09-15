@@ -65,12 +65,20 @@ public class RetrievalService {
             "请问", "帮我", "我想", "我要", "一下", "的话", "以及", "或者", "还有", "这个", "那个",
             "我们", "他们", "自己", "关于", "对于", "根据", "知道", "了解", "介绍", "解释", "说明");
 
+    /** 检索入口（写轨迹）。 */
+    public List<RetrievalHit> retrieve(Long userId, String sessionId, String query, Long courseId, int topK) {
+        return retrieve(userId, sessionId, query, courseId, topK, true);
+    }
+
     /**
      * 检索入口。
      *
-     * @param courseId 可选，限定在某课程内检索（用于"我学的那门课"这类上下文）
+     * @param courseId   可选，限定在某课程内检索（用于"我学的那门课"这类上下文）
+     * @param writeTrace 是否写检索轨迹。由 {@link RagRetrievalFacade} 调用时传 false：
+     *                   门面会写一条<b>带实际服务方</b>的统一轨迹，避免重复入库。
      */
-    public List<RetrievalHit> retrieve(Long userId, String sessionId, String query, Long courseId, int topK) {
+    public List<RetrievalHit> retrieve(Long userId, String sessionId, String query, Long courseId,
+                                       int topK, boolean writeTrace) {
         long start = System.currentTimeMillis();
         List<RetrievalHit> hits = List.of();
         int candidateCount = 0;
@@ -172,8 +180,11 @@ public class RetrievalService {
             hits = rerank(candidates, normalized, topK);
             return hits;
         } finally {
-            // 无论成功与否都留轨迹：检索不到结果恰恰是最需要被看到的失败
-            persistTrace(userId, sessionId, query, candidateCount, hits, System.currentTimeMillis() - start);
+            // 无论成功与否都留轨迹：检索不到结果恰恰是最需要被看到的失败。
+            // 经门面调用时不重复写（门面会写一条带实际服务方的统一轨迹）。
+            if (writeTrace) {
+                persistTrace(userId, sessionId, query, candidateCount, hits, System.currentTimeMillis() - start);
+            }
         }
     }
 

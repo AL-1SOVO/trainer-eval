@@ -1,0 +1,27 @@
+# Golden 题集（每行一个 JSON 对象，以 # 开头的行为注释）
+# 字段：question / expectedMaterialIds / note
+# 期望资料 ID 对应库中确有正文的两份资料：
+#   3 = 数据保护三大原则详解（合法性/必要性/安全性）
+#   4 = 常见网络安全威胁与防范指南（钓鱼邮件/勒索软件/社会工程/弱口令）
+# 用法：POST /api/v1/rag/golden/import 覆盖式导入，再 POST /api/v1/rag/eval?topK=5 出指标
+# 注意：note 里标"改写"的题目刻意不与原文共享字面词，用来暴露纯关键词检索的短板。
+{"question":"数据保护三大原则是什么","expectedMaterialIds":[3],"note":"标题级知识点"}
+{"question":"企业处理客户数据需要遵循哪些原则","expectedMaterialIds":[3],"note":"同义改写"}
+{"question":"什么是最小化收集数据的要求","expectedMaterialIds":[3],"note":"改写：原文用『必要性原则』"}
+{"question":"为什么要限制个人信息采集范围","expectedMaterialIds":[3],"note":"改写：考察语义相近表述"}
+{"question":"用户数据的采集需要什么前提条件","expectedMaterialIds":[3],"note":"指向合法性原则"}
+{"question":"敏感数据保存时应采取什么措施","expectedMaterialIds":[3],"note":"指向安全性原则"}
+{"question":"数据处理如何做到有法可依","expectedMaterialIds":[3],"note":"改写：合法性原则"}
+{"question":"怎样降低数据泄露带来的风险","expectedMaterialIds":[3],"note":"跨条：安全性+必要性"}
+{"question":"把加密存储当成唯一手段有什么问题","expectedMaterialIds":[3],"note":"原文『常见错误做法』"}
+{"question":"定期清理不再需要的数据属于哪条原则","expectedMaterialIds":[3],"note":"指向必要性原则"}
+{"question":"钓鱼邮件有哪些防范要点","expectedMaterialIds":[4],"note":"标题级知识点"}
+{"question":"勒索软件应该怎么防范","expectedMaterialIds":[4],"note":"资料4第二个威胁"}
+{"question":"社会工程攻击如何识别和应对","expectedMaterialIds":[4],"note":"资料4第三个威胁"}
+{"question":"如何避免弱口令导致凭证泄露","expectedMaterialIds":[4],"note":"资料4第四个威胁"}
+{"question":"收到冒充领导要求转账的消息该怎么办","expectedMaterialIds":[4],"note":"改写：社会工程攻击场景"}
+{"question":"为什么要定期备份并且离线保存","expectedMaterialIds":[4],"note":"指向勒索软件防范"}
+{"question":"简单密码为什么容易被破解","expectedMaterialIds":[4],"note":"指向弱口令"}
+{"question":"怎样判断发件人是否可信","expectedMaterialIds":[4],"note":"改写：钓鱼邮件防范"}
+{"question":"多因素认证能解决什么问题","expectedMaterialIds":[4],"note":"指向凭证泄露防范"}
+{"question":"终端防护和及时打补丁针对的是哪类威胁","expectedMaterialIds":[4],"note":"指向勒索软件"}

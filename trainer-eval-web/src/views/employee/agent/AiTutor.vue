@@ -35,6 +35,28 @@
         </template>
       </div>
 
+      <div v-if="sources.length" class="sources">
+        <div class="sources-head">参考来源（{{ sources.length }}）</div>
+        <div class="source-list">
+          <div
+            v-for="(s, i) in sources"
+            :key="s.citation || i"
+            class="source-item"
+            :class="{ clickable: !!s.courseId }"
+            @click="openSource(s)"
+          >
+            <el-tag size="small" effect="plain" class="source-cite">{{ s.citation }}</el-tag>
+            <div class="source-text">
+              <div class="source-title">{{ s.title }}</div>
+              <div class="source-meta">
+                {{ s.courseName }}<template v-if="s.chapterTitle"> · {{ s.chapterTitle }}</template>
+              </div>
+            </div>
+            <span v-if="typeof s.score === 'number'" class="source-score">{{ (s.score * 100).toFixed(1) }}</span>
+          </div>
+        </div>
+      </div>
+
       <div class="chat-input">
         <el-input
           v-model="input"
@@ -56,14 +78,18 @@
 <script setup>
 import { nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { streamAgentChat } from '@/api/agent'
 import { useUserStore } from '@/stores/user'
 
+const router = useRouter()
 const userStore = useUserStore()
 const input = ref('')
 const streaming = ref(false)
 const messages = ref([])
 const bodyRef = ref(null)
+// 本轮回答的引用来源（由后端 SSE 的 citation 事件推送）
+const sources = ref([])
 let sessionId = localStorage.getItem('agent_session')
 if (!sessionId) {
   sessionId = crypto.randomUUID()
@@ -98,6 +124,7 @@ function send(preset) {
   if (!text || streaming.value) return
   input.value = ''
   streaming.value = true
+  sources.value = []
   messages.value.push({ role: 'user', content: text })
   scrollBottom()
 
@@ -125,6 +152,10 @@ function send(preset) {
         messages.value.push({ role: 'assistant', content: data.text || '', streaming: true })
       }
       scrollBottom()
+    } else if (event === 'citation') {
+      // 检索命中的引用证据：渲染"参考来源"，让回答可溯源、可审计
+      sources.value = data.sources || []
+      scrollBottom()
     } else if (event === 'done') {
       const last = messages.value[messages.value.length - 1]
       if (last && last.role === 'assistant') last.streaming = false
@@ -151,6 +182,12 @@ function send(preset) {
   }).catch(() => {
     streaming.value = false
   })
+}
+
+function openSource(source) {
+  if (source && source.courseId) {
+    router.push(`/employee/course-learn/${source.courseId}`)
+  }
 }
 
 function toolLabel(name) {
@@ -269,5 +306,78 @@ function toolLabel(name) {
 
 .send-btn {
   height: 52px;
+}
+
+/* ---- 参考来源（引用证据）---- */
+.sources {
+  border-top: 1px dashed #e2e8f0;
+  padding: 10px 0 12px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.sources-head {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+
+.source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.source-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid #eef1f5;
+  border-radius: 8px;
+  background: #fafbfc;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.source-item.clickable {
+  cursor: pointer;
+}
+
+.source-item.clickable:hover {
+  background: #f0f7ff;
+  border-color: #c6e0ff;
+}
+
+.source-cite {
+  flex: none;
+  font-family: Consolas, Monaco, monospace;
+}
+
+.source-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.source-title {
+  font-size: 13px;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-meta {
+  font-size: 12px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-score {
+  flex: none;
+  font-size: 12px;
+  color: #94a3b8;
+  font-family: Consolas, Monaco, monospace;
 }
 </style>

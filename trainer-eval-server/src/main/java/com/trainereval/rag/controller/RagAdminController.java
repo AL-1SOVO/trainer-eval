@@ -2,6 +2,7 @@ package com.trainereval.rag.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.trainereval.common.result.R;
+import com.trainereval.common.util.SecurityUtils;
 import com.trainereval.rag.dto.RetrievalHit;
 import com.trainereval.rag.entity.RagChunk;
 import com.trainereval.rag.entity.RagEvalRun;
@@ -12,6 +13,7 @@ import com.trainereval.rag.mapper.RagGoldenItemMapper;
 import com.trainereval.rag.mapper.RagRetrievalTraceMapper;
 import com.trainereval.rag.service.ChunkingService;
 import com.trainereval.rag.service.GoldenEvalService;
+import com.trainereval.rag.service.RagRetrievalFacade;
 import com.trainereval.rag.service.RetrievalService;
 import com.trainereval.training.entity.TraMaterial;
 import com.trainereval.training.mapper.TraMaterialMapper;
@@ -39,10 +41,29 @@ public class RagAdminController {
     private final ChunkingService chunkingService;
     private final RetrievalService retrievalService;
     private final GoldenEvalService goldenEvalService;
+    private final RagRetrievalFacade retrievalFacade;
     private final RagChunkMapper chunkMapper;
     private final RagGoldenItemMapper goldenMapper;
     private final RagRetrievalTraceMapper traceMapper;
     private final TraMaterialMapper materialMapper;
+
+    /**
+     * 检索链路健康状态：是否启用 MimirQ、熔断是否打开、最近一次失败原因。
+     * 排查"为什么降级了"时先看这里。
+     */
+    @GetMapping("/health")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> health() {
+        return R.ok(retrievalFacade.health());
+    }
+
+    /** 从 classpath 的 golden-rag.jsonl 覆盖式导入 Golden 题集。 */
+    @PostMapping("/golden/import")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> importGolden() {
+        int count = goldenEvalService.importFromClasspath();
+        return R.ok("Golden 题集导入完成", Map.of("imported", count));
+    }
 
     /** 全量重建切块。 */
     @PostMapping("/reindex")
@@ -80,13 +101,25 @@ public class RagAdminController {
                 .orderByAsc(RagChunk::getChunkIndex)));
     }
 
-    /** 检索调试：直接看混合召回结果与各命中通道。 */
+    /**
+     * 检索调试：返回实际服务方（backend）、是否降级、降级原因与命中明细。
+     * 走的是 Agent 同一条链路，因此这里的输出可以当作"线上此刻会返回什么"。
+     */
     @PostMapping("/search")
-    public R<List<RetrievalHit>> search(@RequestBody Map<String, Object> body) {
+    public R<Map<String, Object>> search(@RequestBody Map<String, Object> body) {
         String query = body.get("query") == null ? "" : String.valueOf(body.get("query"));
         Long courseId = body.get("courseId") instanceof Number n ? n.longValue() : null;
         int topK = body.get("topK") instanceof Number n ? Math.min(Math.max(n.intValue(), 1), 20) : 5;
-        return R.ok(retrievalService.debug(query, courseId, topK));
+        // 走门面而不是 RetrievalService：这样调试接口反映的是 Agent 真实走的那条链路
+        // （含 MimirQ、降级、权限裁剪），否则"调试通过"不代表线上没问题。
+        RagRetrievalFacade.RagResult result = retrievalFacade.search(
+                SecurityUtils.getCurrentUserId(), "rag-debug", query, courseId, topK);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("backend", result.backend());
+        out.put("degraded", result.degraded());
+        out.put("note", result.note());
+        out.put("hits", result.hits());
+        return R.ok(out);
     }
 
     /** 运行 Golden 评测。 */
