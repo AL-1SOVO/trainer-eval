@@ -180,3 +180,123 @@ MimirQ(混合召回+重排) → 本地混合(ngram全文 + 子串 + RRF) → 子
 4. Java 侧**无需改代码**：`mimirq.enabled` 已是 `true`，服务一上线自动切到一级链路
 5. 重跑 `POST /api/v1/rag/eval?topK=5`，此时 "CHAIN" 行的数字就是 MimirQ 的真实成绩，
    与 `LIKE_BASELINE`、以及本轮记录的"本地混合"三方对比
+
+---
+
+## 五、MimirQ 实际部署记录 — 2026-09-16
+
+### 5.1 现在的状态：**栈已跑起来、数据已入库，但检索端点返回 403**
+
+| 环节 | 状态 |
+| --- | --- |
+| Docker Desktop | ✅ 已启动（Server 29.4.3） |
+| 基础镜像 | ✅ `redis:7` / `postgres:15` 拉取成功（**文档标记的最大风险已排除**） |
+| 镜像构建 | ✅ 成功（首次在 HF 模型下载处失败，重试即通过） |
+| 容器 | ✅ api / worker / postgres / redis **全部 healthy** |
+| dataset | ✅ `course-1` = `bc4eeab3-ce4c-4871-84e7-5a5cce043238` |
+| 文档入库 | ✅ 2 份（M3、M4），各 1 chunk，`status=completed`（10 秒内处理完） |
+| Dify 映射 | ✅ 已回填 `DIFY_EXTERNAL_KNOWLEDGE_MAP_JSON` 并重启 api |
+| **检索端点** | ❌ `POST /integrations/dify/retrieval` → **403 `Not a tenant member`** |
+
+**唯一剩余阻塞**：Dify External Knowledge 端点的鉴权。已试过但无效：
+`DIFY_EXTERNAL_KNOWLEDGE_TENANT_ID=00000000-0000-0000-0000-000000000000`。
+从错误语义看（key 认得、但账号不是租户成员），下一步应查
+`app/api/v1/integrations_dify.py` 里 API key → tenant/account 的映射逻辑，
+或改用 MimirQ 原生检索端点绕过这层鉴权。
+
+**Java 侧无需改代码**：`mimirq.enabled` 已是 `true`；端点一旦通，
+`/rag/health` 的 `circuitOpen` 会转 false、`/rag/search` 的 `backend` 会变成 `MIMIRQ`。
+
+### 5.2 用到的部署配置（`D:\mimirq-test\.env`）
+
+```
+SECRET_KEY=<随机 48 位>                      # 必填，原 .env 缺失
+LLM_API_BASE=https://api.deepseek.com/v1     # 复用现有 key
+LLM_MODEL=deepseek-chat
+LLM_API_KEY=sk-****
+EMBEDDING_PROVIDER=deterministic_test        # 先跑通链路：无 key、无模型下载
+EMBEDDING_MODEL=mimirq-deterministic-test-v1
+EMBEDDING_DIM=256
+DIFY_EXTERNAL_KNOWLEDGE_ENABLED=true
+DIFY_EXTERNAL_KNOWLEDGE_API_KEYS=<随机>      # 启用时必须非空，否则启动校验失败
+DIFY_EXTERNAL_KNOWLEDGE_MAP_JSON={"course-1":{"dataset_ids":["bc4eeab3-..."]}}
+INITIAL_ADMIN_USERNAME=admin
+INITIAL_ADMIN_EMAIL=admin@mimirq.com         # 原来缺失 → 容器启动崩溃
+INITIAL_ADMIN_PASSWORD=****
+```
+
+### 5.3 可复现的操作序列
+
+```bash
+# 1) 启动 Docker Desktop，轮询等守护进程就绪（不要立刻构建）
+# 2) 先验证 Docker Hub 可达
+docker pull redis:7 && docker pull postgres:15
+# 3) 构建 + 启动（首次约 15 分钟；HF 模型下载失败就重试一次）
+cd /d D:\mimirq-test
+docker compose --project-name mimirq --env-file .env -f docker/docker-compose.lite.yml up -d --build
+# 4) 健康检查
+curl http://localhost:8000/api/v1/health/ready      # -> {"ok":true,"status":"ready"}
+```
+
+```bash
+# 5) 登录（字段是 identifier，不是 username/email）
+curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"identifier":"admin","password":"<INITIAL_ADMIN_PASSWORD>"}'
+#   -> {"user":{...},"token":{"access_token":"...","expires_in":1800}}
+# 6) 建 dataset（记下 UUID）
+curl -s -X POST http://localhost:8000/api/v1/datasets/ -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" -d '{"name":"course-1","description":"..."}'
+# 7) 灌入课程资料（file_type 用扩展名、不带点！）
+curl -s -X POST http://localhost:8000/api/v1/documents/manual \
+  -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" --data-binary @body.json
+#   body: {"dataset_id":"<uuid>","filename":"m3.txt","file_type":"txt",
+#          "file_size":246,"chunks":[{"content":"...","page_number":1}]}
+# 8) 回填 DIFY_EXTERNAL_KNOWLEDGE_MAP_JSON 后重启 api
+```
+
+### 5.4 本轮新踩的坑（编号接上一节）
+
+- **坑12：下载包是嵌套目录且路径含中文。** `E:\浏览器下载\MimirQ-main\MimirQ-main`（zip 解压多一层），
+  内容与 `D:\mimirq-test` 完全相同（3623 vs 3624 文件）。**用 `D:\mimirq-test`**：
+  它已有 `.env`、路径是纯 ASCII（Docker 构建上下文/bind mount 对非 ASCII 路径有风险）、且是 git clone 可 `git pull`。
+- **坑13：Docker Desktop 没运行。** 报错是 `failed to connect to the docker API at npipe://.../dockerDesktopLinuxEngine`。
+  先 `Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"`，再轮询
+  `docker version --format '{{.Server.Version}}'` 等守护进程就绪，**不要马上构建**。
+- **坑14（好消息）：Docker Hub 其实拉得动。** `redis:7` / `postgres:15` 均拉取成功，
+  方案文档第九节最担心的"国内拉不动基础镜像"没有发生。
+- **坑15：首次构建在 HF 模型下载处失败，但那是瞬时故障。** 报错
+  `huggingface_hub.errors.LocalEntryNotFoundError: ConnectError: [Errno 101] Network is unreachable`，
+  而同一时刻容器访问 `hf-mirror.com` 与 `huggingface.co` 都是 200。**直接重试即可**（pip 层有缓存，很快到失败点）。
+- **坑16：模型下载在构建期，而 `HF_ENDPOINT` 没有传进去。** Dockerfile 里只有 `HF_HOME`，
+  没有 `ARG/ENV HF_ENDPOINT`；compose 的 `build.args` 也只传了两个构建元数据。
+  所以 `.env` 里的 `HF_ENDPOINT=https://hf-mirror.com` **对构建无效**，容器直连 huggingface.co（会吃到 429 限流）。
+  若再次因 429/网络失败，需在 Dockerfile 补 `ARG HF_ENDPOINT` + `ENV HF_ENDPOINT` 并在 compose 传值。
+- **坑17：`INITIAL_ADMIN_EMAIL` 缺失导致容器启动崩溃。**（进度文档那句"`INITIAL_ADMIN_*` 别漏"就是说这个）
+  校验要求 `USERNAME` + `EMAIL` + **恰好一个**密码来源三者齐全，否则
+  `ValidationError: INITIAL_ADMIN bootstrap requires INITIAL_ADMIN_EMAIL, INITIAL_ADMIN_USERNAME, and exactly one password source`。
+- **坑18：`email_validator` 拒绝 `.local` 这类特殊用途域名。** 填 `admin@mimirq.local` 会报
+  `INITIAL_ADMIN_EMAIL must be a valid email address`（`.local`/`.test`/`.invalid`/`.localhost` 都被拒）。用 `admin@mimirq.com`。
+- **坑19：登录字段是 `identifier`，不是 `username`/`email`；token 在 `token.access_token` 下。**
+  发 `{"username":...}` 会 422；响应结构是 `{"user":{...},"token":{"access_token":...}}`。
+- **坑20：`/documents/manual` 的 `file_type` 要"扩展名不带点"，不是 MIME。**
+  代码是 `file_type_with_dot = f".{request.file_type.lower()}"` 再比对 `allowed_extensions_list`；
+  传 `text/markdown` → 400 `Unsupported file type`，传 `txt` → 201。
+- **坑21（最费时间的坑）：PowerShell 5.1 的 `Invoke-RestMethod` 会挂死，curl 秒回。**
+  同一个 POST，`Invoke-RestMethod` 等满 150s 无响应，`curl --max-time 60` **8~14ms 返回 201**。
+  更坑的是 PowerShell 超时被杀时**会丢掉已缓冲的输出**，看起来像"服务端卡死"，实际服务端一直是好的。
+  **结论：调这些 HTTP 接口一律用 curl**，并用 `-w "HTTP=%{http_code} T=%{time_total}"` 记录耗时。
+- **坑22：mysql 客户端不加 `--raw` 会破坏 JSON。** `JSON_OBJECT()` 产出的 `\n` 会被客户端反转义成真换行，
+  导致"一行一个 JSON"变成多行、`ConvertFrom-Json` 报"应为 ':' 或 '}'"。加 `--raw` 解决。
+- **坑23：PowerShell 5.1 不支持 `??`**；也不要把 hashtable 传给函数再 `ConvertTo-Json`
+  （会产出非法 body，服务端报 `json_invalid: Extra data`）——**显式拼 JSON 字符串最稳**。
+
+### 5.5 下一步（按顺序）
+
+1. **解决 403 `Not a tenant member`**：查 `app/api/v1/integrations_dify.py` 的 API key → tenant/account 映射；
+   或改用 MimirQ 原生检索端点（`/api/v1/rag/*`、`/retrieval/*`）绕过 Dify 兼容层鉴权。
+2. 检索通了之后，给 Java 侧配上 `MIMIRQ_API_KEY`（`application.yml` 的 `mimirq.api-key` 或环境变量），
+   **不需要改代码**。
+3. 重跑 `/api/v1/rag/health`（`circuitOpen` 应为 false）、`/rag/search`（`backend` 应为 `MIMIRQ`）、`/rag/eval`。
+4. 要真实语义检索质量时，把 `EMBEDDING_PROVIDER` 换成 `openai_compatible` + SiliconFlow `BAAI/bge-m3`，
+   **并重建索引**（换 embedding 模型必须重建，MimirQ 的硬要求）。
