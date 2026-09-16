@@ -357,3 +357,132 @@ curl -s -X POST http://localhost:8000/api/v1/documents/manual \
 4. **Java 侧产物清理**：`agent/tools/MimirQRetriever.java` 是并行开发产生的、
    **完全没有接线**的重复实现（只有 `@Slf4j`，无 `@Component`/`@Bean`，全项目 0 处引用），
    与现在的 `rag/mimirq/MimirQClient` + `RagRetrievalFacade` 功能重叠，建议删除以免误导。
+
+---
+
+## 六、员工可用化：让"上传即可检索"真正成立 — 2026-09-16
+
+### 6.1 需求与暴露出来的两个真问题
+
+需求原话：**RAG 查询应该是员工也可以使用**，方便员工迅速查找企业培训文档的知识；
+文档由系统管理员或内训师上传。
+
+把这句话翻译成代码，发现原来的实现有两个硬伤：
+
+| # | 现象 | 根因 |
+|---|------|------|
+| A | 员工**根本没有入口** | 检索只挂在 `/api/v1/rag/*`，而它整体是管理与调试面（`@PreAuthorize` 限 TRAINER/MANAGER），返回 `backend`/`score` 原值这类内部字段 |
+| B | 内训师传了文档，员工**搜不到** | ① 没有自动建索引，必须管理员手动调 `/rag/reindex`；② 更致命的是检索链把"MimirQ 返回 0 条"当成权威结论，直接 return，**不再查本地** |
+
+B 的第二点是本轮最值得记的：**把"派生索引的滞后"误当成了"事实的缺失"**。
+
+### 6.2 交付物
+
+**后端**
+
+| 文件 | 作用 |
+|------|------|
+| `rag/controller/KnowledgeSearchController.java`（新增） | 产品面接口：`POST /api/v1/knowledge/search`、`GET /api/v1/knowledge/courses`。无 `@PreAuthorize`（登录即可用），只返回员工需要的信息（标题/课程/章节/片段/出处/相关度），降级时给一句人话而不是服务名 |
+| `rag/service/KnowledgeAccessService.java` | 新增 `rag.security-trimming.mode`：`PUBLISHED`（默认，与课程列表可见范围一致）/ `ENROLLED`（仅已报名课程） |
+| `rag/service/RagRetrievalFacade.java` | MimirQ 命中数 < topK 时，用本地混合补齐（去重后追加）；`strategy` 记为 `MIMIRQ+LOCAL_HYBRID` |
+| `training/service/TraCourseContentService.java` | 资料新增/修改/删除后**自动同步切块索引**（提交后执行） |
+| `resources/db/knowledge_search_menu.sql`（新增） | 幂等迁移：写入菜单 7「知识搜索」并授权给 员工/内训师/管理员 |
+| `resources/seed.sql`、`resources/application.yml` | 同步新菜单与 `mode` 配置 |
+
+**前端**
+
+| 文件 | 作用 |
+|------|------|
+| `api/knowledge.js`（新增） | 检索接口封装 |
+| `views/employee/knowledge/KnowledgeSearch.vue`（新增） | 员工检索页：关键词框 + 课程筛选 + 结果卡片（出处标签、相关度、原文片段高亮）+ 空/降级态 |
+| `router/index.js` | 新增 `/employee/knowledge-search`；顺带给「培训监管」补 `alias: 'all-courses'`（见坑33） |
+
+### 6.3 实测证据（员工 `employee1` 实测）
+
+```
+GET /api/v1/sys/menus/user   → 员工门户 > [AI学习助手, 知识搜索]     ← 入口可见
+GET /api/v1/knowledge/courses → 3 门已发布课程（status=2 的课程 2 被正确排除）
+POST /api/v1/knowledge/search {"query":"数据加密"}
+     → total=2, degraded=false, [M3#0] 数据保护三大原则详解
+     → trace.strategy = MIMIRQ                            ← MimirQ 正常，未降级
+```
+
+**关键验证：模拟内训师上传一份 MimirQ 里没有的资料**
+
+```
+1) admin POST /training/chapters/3/materials  {content: "零信任办公终端准入基线…"}
+2) 2 秒后 rag_chunk 自动出现 material_id=5, course_id=1, chunk_index=0, char_len=121
+3) employee1 搜「零信任办公终端准入基线」
+     → total=3，第 3 条 [M5#0] mat=5 零信任终端准入基线（自动索引验证）
+     → trace.strategy = MIMIRQ+LOCAL_HYBRID, hit_count=3
+4) PUT 该资料 → rag_chunk 内容同步替换（旧块被删、新块写入）
+5) DELETE 该资料 → rag_chunk 剩余 0 行，chapter.material_count 回到 1
+```
+
+第 3 步就是"内训师上传 → 员工立刻搜得到"的完整证据；
+如果只有 MimirQ 而没补本地，这一步会是 `total=0`。
+
+### 6.4 设计取舍：为什么是"补齐"而不是"二选一"
+
+原实现是 **MimirQ 优先，命中为空就结束**。改成"不足则补本地"的理由：
+
+- **事实源与索引的分工**：`tra_material` / `rag_chunk` 是系统记录的事实，
+  MimirQ 是**可替换的派生索引**（换 embedding、换切块器都要重建）。
+  派生索引暂时落后于事实源是正常状态，不能据此判定"没有这份资料"。
+- **只在 `hits.size() < topK` 时补**：MimirQ 已经给满结果时保持它的排序，
+  避免本地子串匹配的噪声挤进前面、污染喂给模型的上下文。
+  这是 recall 与 precision 之间刻意的偏置：**宁可多补，不可漏掉刚上传的资料**。
+- **去重按 `materialId` 而不是按块**：MimirQ 与本地是两套切块器，
+  块文本不可能完全一致，按块去重等于没去重；同一份资料给两条近似摘录在有限的 topK 里价值很低。
+  （MimirQ 侧的 `material_id` 可能为 null，这时退化为按 `citation` 比较。）
+
+### 6.5 本轮新踩的坑（编号接上一节）
+
+- **坑29（本轮最险）：在事务里 catch 住子服务的异常，并不能阻止外层事务回滚。**
+  最初把 `syncRagIndex()` 直接写在 `createMaterial()` 里，并 `try/catch` 包住，以为"索引失败不影响保存"。
+  实际上 `ChunkingService.rebuildMaterial` 自带 `@Transactional`，它抛异常时 Spring 会把
+  **外层**事务标记为 `rollback-only`；`catch` 只挡住了异常，没挡住标记，
+  外层 commit 时照样抛 `UnexpectedRollbackException` —— **"索引失败"最终还是把"资料保存"拖垮了**。
+  正解：`TransactionSynchronizationManager.registerSynchronization(...)` 里在 `afterCommit` 执行，
+  让索引写入成为一个独立事务。附带好处：索引失败后资料已提交，可用 `/rag/reindex` 补建。
+  另外 `afterCommit` 前要判 `isSynchronizationActive()`，否则无事务场景（单测直接调用）会**静默不执行**。
+- **坑30：`MIMIRQ_API_KEY` 为空时 MimirQ 返回 401，而链路"看起来是正常的"。**
+  我启动测试实例时显式传了空字符串，覆盖了 `.env.local` 的值，
+  结果连续 3 次 401 → 熔断 → 全部降级到本地。
+  日志里是 `WARN ... 401 Unauthorized`，接口仍 `code=200`，只是 `degraded=true` ——
+  **很容易被当成"检索就是这么差"**。排查时先看 `rag_retrieval_trace.strategy`。
+  顺带发现项目根**没有 `.env.local`**（`start.ps1` 会找它），已补一份并说明。
+- **坑31：`.env.local` 里写一行空的 `DEEPSEEK_API_KEY=` 会让人以为"配了但没生效"。**
+  `start.ps1` 的取值顺序是 `$env:DEEPSEEK_API_KEY`（含用户级环境变量）→ `.env.local`，
+  且正则要求 `=(.+)` 非空，所以空值不会覆盖环境变量。
+  但文件里留一行空赋值极容易误导，已改成注释掉并写明回退关系。
+- **坑32：`test-data.sql` 的注释说 `employee1` 密码是 `123456`，实际是 `admin123`。**
+  同一个 BCrypt 串在 `seed.sql` 里注释为 `admin123`——两者矛盾，照着 `123456` 试会一直登录失败。
+  已改注释。（**测出这一点本身就是"文档与代码不一致"这类 bug 的典型形态**：
+  不影响运行，但会持续消耗后来者的时间。）
+- **坑33：`sys_menu.path` 与前端路由不一致，「培训监管」点了直接 404。**
+  数据库里是 `all-courses`（`seed.sql` 也这么写），而 `router/index.js` 定义的是 `training`。
+  侧边栏用 `父路径 + '/' + 子路径` 拼地址，所以拼出 `/manager/all-courses` → NotFound。
+  修法是给路由加 `alias: 'all-courses'`，**不动数据库**（改数据会影响已有环境，加 alias 零风险）。
+- **坑34：新增员工可见菜单要同时动两张表，而且前端要刷新。**
+  `sys_menu`（菜单本体）+ `sys_role_menu`（角色授权，本次要授 员工/内训师/管理员）缺一不可。
+  另外菜单树缓存在 Pinia（登录后 `GET /sys/menus/user` 拉取），
+  **改完数据库必须重新登录或刷新页面**，否则会以为"改了没生效"。
+- **坑35：`mvn -DskipTests package` 在离线模式下会失败。**
+  `-DskipTests` 仍要解析 `maven-surefire-plugin`，离线仓库里缺 `surefire-api:3.5.3` 就报
+  `Cannot access central ... in offline mode`。用 `spring-boot:run`（`start.ps1` 就是这么做的）
+  或 `-Dmaven.test.skip=true` 绕开。
+
+### 6.6 还没做 / 已知边界（不要误以为已经完成）
+
+1. **MimirQ 侧仍然是手工同步的。** 本轮实现的是"本地方案"：
+   `rag_chunk` 自动更新 + MimirQ 为空时补本地。
+   **没有**实现"上传后自动推到 MimirQ"——因为 MimirQ 的写入接口
+   （`POST /api/v1/documents/manual`）要用账号密码登录拿 30 分钟有效的 token，
+   还要维护 `courseId → dataset UUID` 的映射（现在写在 MimirQ 的 `.env` 里）。
+   要做的话需要新增一个带 token 缓存/续期的写入客户端，属于下一步。
+   影响：**新资料能搜到，但走的是本地通道，拿不到 MimirQ 的混合召回+重排**。
+2. **embedding 仍是 `deterministic_test`**（坑见 5.5 第 1 条）。
+   换真模型前，`relevance` 数值**只有相对意义、没有语义意义**，不要拿它做质量结论。
+3. **`tra_material` 里 DOCUMENT/VIDEO 类没有正文**，解析层缺失导致这类资料进不了索引。
+

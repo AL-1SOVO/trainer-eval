@@ -83,9 +83,15 @@ mimirq:
 
 rag:
   security-trimming:
-    # 按 tra_enrollment 裁剪可检索范围（企业级 RAG 与 demo 的分水岭）。
-    # 关成 false 会让学生检索到未报名课程的资料，仅建议本地调试使用。
+    # 裁剪总开关。关成 false 会让学生检索到未发布课程的资料，仅建议本地调试使用。
     enabled: ${RAG_TRIMMING_ENABLED:true}
+    # 裁剪模式：
+    #   PUBLISHED（默认）—— 员工可检索所有"已发布"课程的资料，与课程列表接口可见范围一致。
+    #     为什么默认是它：员工检索的目的是"快速查企业培训文档"，若限定为已报名课程，
+    #     会出现"在课程页看得见、在搜索里搜不到"的自相矛盾，且不引入新的暴露面
+    #     （已发布课程的资料本来就能从课程详情页读到）。
+    #   ENROLLED —— 只能检索已报名课程，适合资料按部门/项目保密的场景。
+    mode: ${RAG_TRIMMING_MODE:PUBLISHED}
 
 app:
   upload:

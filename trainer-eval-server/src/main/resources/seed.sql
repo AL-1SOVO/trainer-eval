@@ -32,6 +32,9 @@ INSERT INTO sys_menu (id, parent_id, menu_name, menu_type, path, component, perm
 (4, 1, '我的考试', 'C', 'my-exams', 'employee/exam/ExamList', NULL, 'EditPen', 3),
 (5, 1, '错题分析', 'C', 'wrong-analysis', 'employee/analysis/WrongAnalysis', NULL, 'Warning', 4),
 (6, 1, 'AI学习助手', 'C', 'ai-tutor', 'employee/agent/AiTutor', NULL, 'ChatDotRound', 5),
+-- 知识搜索：员工/内训师共用的培训文档检索入口（后端 /api/v1/knowledge/search）
+-- 注意：这里给的是 sys_menu 的行；角色授权在文件末尾（菜单 7 → 员工/内训师/管理员）
+(7, 1, '知识搜索', 'C', 'knowledge-search', 'employee/knowledge/KnowledgeSearch', NULL, 'Search', 6),
 
 -- Trainer Portal
 (10, 0, '内训师门户', 'M', '/trainer', NULL, NULL, 'UserFilled', 2),
@@ -58,3 +61,7 @@ INSERT INTO sys_menu (id, parent_id, menu_name, menu_type, path, component, perm
 -- Manager role gets ALL menus
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 3, id FROM sys_menu;
+
+-- 员工 / 内训师：知识搜索（员工查资料、内训师上传后自查"员工能不能搜到"）
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, 7 FROM sys_role r WHERE r.role_name IN ('员工', '内训师');

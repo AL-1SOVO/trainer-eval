@@ -4,7 +4,9 @@ USE trainer_eval;
 -- Give admin all three roles so they can access everything
 INSERT IGNORE INTO sys_user_role (user_id, role_id) VALUES (1, 1), (1, 2);
 
--- Add a test employee user (password: 123456)
+-- Add a test employee user.
+-- 密码是 admin123（与 seed.sql 里 admin 用的是同一个 BCrypt 串）。
+-- 旧注释写的是 123456，与 hash 不符，照着试会一直登录失败。
 INSERT INTO sys_user (username, password, real_name, email, phone, dept_id, status) VALUES
 ('employee1', '$2a$10$faM9BuOwAkPQfJJWqSuJyu9cNd.S.48stfUqhBbKOtwhvJVKtW/4C', '测试员工', 'emp1@company.com', '13800000001', 2, 1);
 INSERT INTO sys_user_role (user_id, role_id) VALUES (2, 1);

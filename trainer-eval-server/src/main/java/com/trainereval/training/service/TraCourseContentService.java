@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.trainereval.common.exception.BusinessException;
 import com.trainereval.common.exception.ErrorCode;
 import com.trainereval.common.util.SecurityUtils;
+import com.trainereval.rag.mapper.RagChunkMapper;
+import com.trainereval.rag.service.ChunkingService;
 import com.trainereval.training.dto.TraChapterForm;
 import com.trainereval.training.dto.TraMaterialForm;
 import com.trainereval.training.entity.TraChapter;
@@ -16,6 +18,7 @@ import com.trainereval.training.mapper.TraCourseMapper;
 import com.trainereval.training.mapper.TraEnrollmentMapper;
 import com.trainereval.training.mapper.TraLearningProgressMapper;
 import com.trainereval.training.mapper.TraMaterialMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xslf.usermodel.XSLFShape;
 import org.apache.poi.xslf.usermodel.XSLFSlide;
 import org.apache.poi.xslf.usermodel.XSLFTextShape;
@@ -29,6 +32,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
@@ -53,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @Service
 public class TraCourseContentService {
 
@@ -70,6 +76,17 @@ public class TraCourseContentService {
 
     @Autowired
     private TraLearningProgressMapper progressMapper;
+
+    /**
+     * 索引侧依赖。用 required=false 注入：RAG 属于派生能力，
+     * 万一将来被做成可选模块（或单测里只 new 这个 service），
+     * 课程资料管理本身不能因此起不来。配合下面的 null 判断使用。
+     */
+    @Autowired(required = false)
+    private ChunkingService chunkingService;
+
+    @Autowired(required = false)
+    private RagChunkMapper ragChunkMapper;
 
     @Value("${app.upload.path:D:/trainer-eval/uploads}")
     private String uploadPath;
@@ -151,6 +168,10 @@ public class TraCourseContentService {
 
         refreshChapterMaterialCount(chapterId);
         refreshCourseEnrollmentProgress(chapter.getCourseId());
+        // 自动建索引：资料一落库就同步切块，员工立刻能搜到。
+        // 原先必须由管理员手动调 /rag/reindex，导致"内训师传了文档、员工搜不到"。
+        // 这里失败不能影响资料保存本身（索引是可重建的派生数据）。
+        syncRagIndex(materialMapper.selectById(material.getId()));
         return materialMapper.selectById(material.getId());
     }
 
@@ -177,8 +198,9 @@ public class TraCourseContentService {
             material.setSortOrder(form.getSortOrder());
         }
         materialMapper.updateById(material);
-
         refreshCourseEnrollmentProgress(chapter.getCourseId());
+        // 内容变了就重建该资料的切块，保证检索与正文一致
+        syncRagIndex(materialMapper.selectById(materialId));
         return materialMapper.selectById(materialId);
     }
 
@@ -197,6 +219,8 @@ public class TraCourseContentService {
 
         materialMapper.deleteById(materialId);
         deleteMaterialProgress(materialId);
+        // 资料删了，索引也要清掉，否则会搜到已删除的内容
+        removeRagIndex(materialId);
         refreshChapterMaterialCount(chapter.getId());
         refreshCourseEnrollmentProgress(chapter.getCourseId());
     }
@@ -642,5 +666,76 @@ public class TraCourseContentService {
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
                 .replace("\"", "&quot;");
+    }
+
+    // ------------------------------------------------------------------ RAG 索引联动
+
+    /**
+     * 资料落库后同步切块索引。
+     * <p>
+     * 为什么放在"事务提交之后"执行，而不是在这里直接调 chunkingService：
+     * <ol>
+     *   <li>{@code ChunkingService.rebuildMaterial} 自带 {@code @Transactional}。若在当前事务中直接调用，
+     *       它一旦抛异常，Spring 会把<b>外层</b>事务标记成 rollback-only —— 这里就算 catch 住，
+     *       外层 commit 时仍会抛 {@code UnexpectedRollbackException}，"索引失败"会把"资料保存"一起拖垮。</li>
+     *   <li>索引是派生数据：允许失败、允许延迟，事后可用 {@code POST /api/v1/rag/reindex} 重建。
+     *       业务数据（资料本身）不能因为索引失败而回滚。</li>
+     * </ol>
+     */
+    private void syncRagIndex(TraMaterial material) {
+        if (material == null || material.getId() == null) {
+            return;
+        }
+        afterCommit(() -> {
+            if (chunkingService == null) {
+                return;
+            }
+            try {
+                int chunks = chunkingService.rebuildMaterial(material);
+                log.info("RAG 索引已同步：materialId={}, title={}, chunks={}",
+                        material.getId(), material.getTitle(), chunks);
+            } catch (Exception e) {
+                // 只记警告：员工暂时搜不到这条新资料，但资料已保存成功，可手动重建
+                log.warn("RAG 索引同步失败（不影响资料保存），materialId={}，可调用 /api/v1/rag/reindex 重建：{}",
+                        material.getId(), e.toString());
+            }
+        });
+    }
+
+    /** 资料删除后清掉索引，否则员工会搜到已删除的内容。 */
+    private void removeRagIndex(Long materialId) {
+        if (materialId == null) {
+            return;
+        }
+        afterCommit(() -> {
+            if (ragChunkMapper == null) {
+                return;
+            }
+            try {
+                int removed = ragChunkMapper.deleteByMaterialId(materialId);
+                if (removed > 0) {
+                    log.info("RAG 索引已清理：materialId={}, chunks={}", materialId, removed);
+                }
+            } catch (Exception e) {
+                log.warn("RAG 索引清理失败，materialId={}：{}", materialId, e.toString());
+            }
+        });
+    }
+
+    /**
+     * 注册"事务提交后执行"。没有活跃事务时（例如单测直接调用）立即执行，
+     * 避免出现"注册了却永远不触发"的静默失效。
+     */
+    private void afterCommit(Runnable task) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            task.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                task.run();
+            }
+        });
     }
 }

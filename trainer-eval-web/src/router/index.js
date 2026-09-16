@@ -26,7 +26,8 @@ const routes = [
       { path: 'exam/:recordId', name: 'ExamTaking', component: () => import('@/views/employee/exam/ExamTaking.vue'), meta: { title: '考试中' } },
       { path: 'exam-result/:recordId', name: 'ExamResult', component: () => import('@/views/employee/exam/ExamResult.vue'), meta: { title: '考试成绩' } },
       { path: 'wrong-analysis', name: 'WrongAnalysis', component: () => import('@/views/employee/analysis/WrongAnalysis.vue'), meta: { title: '错题分析' } },
-      { path: 'ai-tutor', name: 'AiTutor', component: () => import('@/views/employee/agent/AiTutor.vue'), meta: { title: 'AI学习助手' } }
+      { path: 'ai-tutor', name: 'AiTutor', component: () => import('@/views/employee/agent/AiTutor.vue'), meta: { title: 'AI学习助手' } },
+      { path: 'knowledge-search', name: 'KnowledgeSearch', component: () => import('@/views/employee/knowledge/KnowledgeSearch.vue'), meta: { title: '知识搜索' } }
     ]
   },
   {
@@ -54,7 +55,9 @@ const routes = [
       { path: 'depts', name: 'DeptManage', component: () => import('@/views/manager/dept/DeptManage.vue'), meta: { title: '部门管理' } },
       { path: 'roles', name: 'RoleManage', component: () => import('@/views/manager/role/RoleManage.vue'), meta: { title: '角色管理' } },
       { path: 'menus', name: 'MenuManage', component: () => import('@/views/manager/menu/MenuManage.vue'), meta: { title: '菜单管理' } },
-      { path: 'training', name: 'AllCourses', component: () => import('@/views/manager/training/AllCourses.vue'), meta: { title: '培训监管' } },
+      // alias: sys_menu 里“培训监管”的 path 是 all-courses，而这里定义的是 training。
+      // 之前侧边栏点它会直接进 404。用 alias 对齐，不需要动数据库里的菜单数据。
+      { path: 'training', alias: 'all-courses', name: 'AllCourses', component: () => import('@/views/manager/training/AllCourses.vue'), meta: { title: '培训监管' } },
       { path: 'exam-stats', name: 'ExamStats', component: () => import('@/views/manager/exam/ExamStats.vue'), meta: { title: '考试统计' } },
       { path: 'reports', name: 'ReportGenerate', component: () => import('@/views/manager/report/ReportGenerate.vue'), meta: { title: '报表中心' } },
       { path: 'ai-logs', name: 'AiGradingLog', component: () => import('@/views/manager/log/AiGradingLog.vue'), meta: { title: 'AI评分日志' } }

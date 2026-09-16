@@ -93,10 +93,39 @@ public class RagRetrievalFacade {
             try {
                 List<RetrievalHit> hits = searchMimirQ(scope, requestedCourseId, query, topK);
                 onSuccess();
-                trace(userId, sessionId, query, BACKEND_MIMIRQ, hits, start);
+
+                // MimirQ 命中数不足时，用本地混合把结果补齐。
+                //
+                // 为什么必须补（这是"内训师传了文档、员工搜不到"的根因）：
+                // tra_material / rag_chunk 才是系统的事实源，MimirQ 只是**可替换的派生索引**。
+                // 资料刚上传时本地切块已经写好，但 MimirQ 侧可能还没同步（同步是异步/手动的）。
+                // 如果此时因为"MimirQ 返回 0 条"就判定"知识库没有"，新资料对员工永久不可见 —— 把
+                // 索引的滞后当成了事实的缺失。
+                //
+                // 只在命中数 < topK 时才补：MimirQ 已经给满结果时保持它的排序，
+                // 避免本地子串匹配的噪声挤进前面、污染喂给模型的上下文。
+                List<RetrievalHit> merged = hits;
+                boolean filledFromLocal = false;
+                if (hits.size() < topK) {
+                    List<RetrievalHit> local = searchLocal(scope, requestedCourseId, userId, sessionId, query, topK);
+                    List<RetrievalHit> supplement = excludeCovered(local, hits);
+                    if (!supplement.isEmpty()) {
+                        merged = new ArrayList<>(hits);
+                        for (RetrievalHit hit : supplement) {
+                            if (merged.size() >= topK) {
+                                break;
+                            }
+                            merged.add(hit);
+                        }
+                        filledFromLocal = true;
+                    }
+                }
+
+                String backend = filledFromLocal ? BACKEND_MIMIRQ + "+" + BACKEND_LOCAL : BACKEND_MIMIRQ;
+                trace(userId, sessionId, query, backend, merged, start);
                 // 命中为空不是故障：知识库确实没有相关内容，要如实告知而不是继续降级
-                return new RagResult(hits, BACKEND_MIMIRQ, false,
-                        hits.isEmpty() ? "知识库中未找到相关内容" : null);
+                return new RagResult(merged, backend, false,
+                        merged.isEmpty() ? "知识库中未找到相关内容" : null);
             } catch (Exception e) {
                 onFailure(e);
             }
@@ -334,6 +363,38 @@ public class RagRetrievalFacade {
             log.debug("权限裁剪过滤掉 {} 条不可见命中", candidates.size() - allowed.size());
         }
         return allowed.size() > topK ? allowed.subList(0, topK) : allowed;
+    }
+
+    /**
+     * 从本地候选里剔除"主结果已经覆盖"的条目，用于 MimirQ 与本地结果合并。
+     * <p>
+     * 去重键取 materialId（MimirQ 侧命中里的 material_id 来自 metadata 或标题回填，可能为 null，
+     * 这时退化成用 citation 比较）。取舍说明：同一份资料只补一条，而不是按块去重 ——
+     * MimirQ 与本地是两套切块器，块文本不可能完全一致，按块去重等于没去重；
+     * 在 topK 有限的上下文里，同一份资料给两条近似摘录价值很低。
+     */
+    private List<RetrievalHit> excludeCovered(List<RetrievalHit> candidates, List<RetrievalHit> primary) {
+        Set<String> covered = new HashSet<>();
+        for (RetrievalHit hit : primary) {
+            covered.add(dedupeKey(hit));
+        }
+        List<RetrievalHit> result = new ArrayList<>();
+        for (RetrievalHit hit : candidates) {
+            if (covered.add(dedupeKey(hit))) {
+                result.add(hit);
+            }
+        }
+        return result;
+    }
+
+    private String dedupeKey(RetrievalHit hit) {
+        if (hit == null) {
+            return "";
+        }
+        if (hit.materialId() != null) {
+            return "m:" + hit.materialId();
+        }
+        return "c:" + (hit.citation() == null ? "" : hit.citation());
     }
 
     private List<RetrievalHit> diversify(List<RetrievalHit> hits, int topK) {
