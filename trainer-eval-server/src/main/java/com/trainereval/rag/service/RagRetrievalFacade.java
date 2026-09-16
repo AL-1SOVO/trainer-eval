@@ -6,6 +6,7 @@ import com.trainereval.rag.dto.RetrievalHit;
 import com.trainereval.rag.entity.RagRetrievalTrace;
 import com.trainereval.rag.mapper.RagRetrievalTraceMapper;
 import com.trainereval.rag.mimirq.MimirQClient;
+import com.trainereval.rag.mimirq.MimirQDocumentNaming;
 import com.trainereval.rag.mimirq.MimirQProperties;
 import com.trainereval.training.entity.TraChapter;
 import com.trainereval.training.entity.TraCourse;
@@ -205,12 +206,21 @@ public class RagRetrievalFacade {
         String title = record.title() == null ? "" : record.title();
 
         TraMaterial material = null;
-        Long materialId = extractMaterialId(record.metadata());
+        // ① 优先从文件名前缀反解（m{id}__xxx）：这是自动灌库上传时的命名约定，
+        //    也是唯一不依赖"标题唯一性"的确定性映射。
+        Long materialId = MimirQDocumentNaming.parseMaterialId(title);
         if (materialId != null) {
             material = materialMapper.selectById(materialId);
         }
+        // ② 兼容早期手工灌库写入的 metadata.material_id（MimirQ 当前不会回传，留作前向兼容）
+        if (material == null) {
+            materialId = extractMaterialId(record.metadata());
+            if (materialId != null) {
+                material = materialMapper.selectById(materialId);
+            }
+        }
+        // ③ 兜底：按标题匹配（历史文档是以资料标题命名的，没有 m{id}__ 前缀）
         if (material == null && !title.isBlank()) {
-            // 兜底：按标题匹配（适用于以资料标题命名的知识库文档）
             material = byTitle.get(title.trim());
             if (material == null) {
                 // 知识库文档名通常带扩展名（如 "数据保护三大原则详解.txt"），

@@ -475,14 +475,125 @@ POST /api/v1/knowledge/search {"query":"数据加密"}
 
 ### 6.6 还没做 / 已知边界（不要误以为已经完成）
 
-1. **MimirQ 侧仍然是手工同步的。** 本轮实现的是"本地方案"：
-   `rag_chunk` 自动更新 + MimirQ 为空时补本地。
-   **没有**实现"上传后自动推到 MimirQ"——因为 MimirQ 的写入接口
-   （`POST /api/v1/documents/manual`）要用账号密码登录拿 30 分钟有效的 token，
-   还要维护 `courseId → dataset UUID` 的映射（现在写在 MimirQ 的 `.env` 里）。
-   要做的话需要新增一个带 token 缓存/续期的写入客户端，属于下一步。
-   影响：**新资料能搜到，但走的是本地通道，拿不到 MimirQ 的混合召回+重排**。
+1. ~~MimirQ 侧仍然是手工同步的~~ —— **已在第七节补齐**（`MimirQIngestClient` 自动灌库）。
 2. **embedding 仍是 `deterministic_test`**（坑见 5.5 第 1 条）。
    换真模型前，`relevance` 数值**只有相对意义、没有语义意义**，不要拿它做质量结论。
-3. **`tra_material` 里 DOCUMENT/VIDEO 类没有正文**，解析层缺失导致这类资料进不了索引。
+4. **`tra_material` 里 DOCUMENT/VIDEO 类没有正文**，解析层缺失导致这类资料进不了索引。
+
+---
+
+## 七、两个项目合并 + MimirQ 自动灌库 — 2026-09-16
+
+### 7.1 做了什么
+
+用户决策：**monorepo**（MimirQ 源码纳入本仓库），源码取下载快照。
+于是本轮把"两个项目"变成一个：一套源码、一条命令、一个配置面。
+
+| # | 事项 | 结果 |
+|---|------|------|
+| 1 | vendored MimirQ | `mimirq/`（3623 文件 / 172 MB 入库），逐字节校验与上游一致 |
+| 2 | 运行栈迁移 | 从 `D:\mimirq-test` 切到 `trainer-eval/mimirq`，**数据零丢失** |
+| 3 | 自动灌库 | `MimirQIngestClient` + `RagIndexSyncService`，上传资料自动进知识库 |
+| 4 | 生命周期集成 | `start.cmd` 起 MimirQ（含就绪等待）、`stop.cmd` 停容器保留数据卷 |
+| 5 | 映射加固 | 文件名 `m{materialId}__{标题}.txt`，material_id 确定性回解 |
+
+`mimirq/VENDORED.md` 记录了来源/版本/许可证、体积构成、升级步骤与两端接口约定。
+
+### 7.2 实测证据（完整链路）
+
+```
+创建资料（内训师）  → 449ms 完成，含同步灌库
+  后端日志：RAG 本地索引已同步：materialId=6, chunks=1
+            MimirQ 写入登录成功：identifier=admin@mimirq.com, expires_in=1800s
+            MimirQ 文档已写入：materialId=6, dataset=bc4eeab3-…, file=m6__零信任终端准入基线.txt
+
+MimirQ 侧          → GET /documents?dataset_id=… 出现 'm6__零信任终端准入基线.txt'（completed, 1 chunk）
+直查 MimirQ        → 绕过 Java 层查 Dify 接口，命中 m6__…  score=0.85   ← 证明索引真的有
+员工搜索（employee1）→ [M6#0] mat=6 title=零信任终端准入基线 rel=0.26 degraded=false
+                     ← materialId 由文件名前缀回解，展示标题取数据库（干净、无 m6__ 前缀）
+
+更新资料 → MimirQ 中 m6__ 文档数仍为 1（先删后建，无重复），新内容可检索
+删除资料 → MimirQ 中 m6__ 文档数 0，本地 rag_chunk 0 行，course-1 回到基线 2 条文档
+```
+
+### 7.3 关键设计决策
+
+**1) material_id 只能靠文件名回传 —— 这是读源码 + 实测钉死的，不是猜的**
+
+上传时可以同时写 document 级和 chunk 级 `metadata`，但 Dify 检索响应的 `metadata`
+**只包含 MimirQ 自己的字段**（`dataset_id` / `document_id` / `chunk_id` / `chunk_index` /
+`page_number` / `retrieval_role` / `hit_type` / KG 字段），我们写进去的 `material_id` 一个都不回。
+
+响应里唯一由我们控制且原样回来的字段是 **`title`（= 上传时的 filename）**。所以：
+
+```
+m12__数据保护三大原则详解.txt   →   materialId = 12
+```
+
+相比"拿 title 去和 `tra_material.title` 做匹配"：**不依赖标题唯一**（重名/改名/带扩展名都不会认错），
+且命名保留了人类可读部分，映射失败时看日志就知道是哪条。历史文档仍走标题匹配兜底，未被破坏。
+
+**2) 写本地切块必须 `REQUIRES_NEW`（对第六节的修正）**
+
+第六节用 `afterCommit` + 默认 `REQUIRED` 的写法，实测能写进去，但**它依赖了未定义行为**。
+Spring 的 `TransactionSynchronization.afterCommit` Javadoc 写得很明确：
+
+> 事务已提交，但事务资源可能仍处于活动状态且可访问；此时触发**不会再有 commit 跟随**，
+> 除非显式声明需要在新事务中运行。因此：**从 here 调用的任何事务性操作都应使用 `PROPAGATION_REQUIRES_NEW`**。
+
+也就是说"看着成功了，可能根本没落库"。本轮改成
+`afterCompletion(STATUS_COMMITTED)` + `RagIndexSyncService` 的 `REQUIRES_NEW` 方法：
+语义确定、且顺带保证"索引失败不会把资料保存拖垮"（`REQUIRES_NEW` 挂起外层事务，异常不会污染它）。
+
+**3) HTTP 推送不放进事务**
+
+推给 MimirQ 最长 20s 超时。包进事务会把数据库连接占住整个网络等待，高并发下耗干连接池。
+所以本地切块（事务内）与 MimirQ 推送（事务外）分开，推送读已提交的切块再发请求。
+
+**4) 知识库起不来不能挡住培训系统启动**
+
+`start.ps1` 里 MimirQ 启动失败只警告、不 `exit`：它是派生能力，后端会自动降级到本地混合检索。
+反过来把 Docker 做成硬依赖，一次 Docker Desktop 没启动就让"登录/考试/阅卷"也起不来 —— 优先级错了。
+
+### 7.4 本轮新踩的坑（编号接上一节）
+
+- **坑36（本轮最险，且是自己造成的）：编辑文件会吃掉 `.ps1` 的 UTF-8 BOM。**
+  改完 `start.ps1` / `stop.ps1` 后，BOM 丢了。`start.cmd` 用 `powershell`（Windows PowerShell 5.1）执行，
+  **5.1 无 BOM 时按 ANSI（本机 GBK）解码** → 中文全变 `鏁版嵁搴?` → 语法崩、
+  报一堆"意外的标记 }"/"缺少右引号"，看起来像把脚本改坏了，其实只是编码。
+  教训：**这个项目的 `.ps1` 改完必须补 BOM 并做一次语法自检**：
+  ```powershell
+  $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+  $t = [System.IO.File]::ReadAllText($p, (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($p, $t, $utf8Bom)
+  $null = [System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
+  ```
+  （`.cmd` 相反：必须纯 ASCII、不要 BOM。）
+- **坑37：MimirQ 的 Dify 响应不回传自定义 metadata（实测确认，见 7.3）。**
+  方案文档与直觉都会让人以为"写 chunk metadata 就能拿回 material_id"。不行。
+  这类"文档说可以、实际不行"的差异，只有读源码 + 发一次真实请求才能确认。
+- **坑38：`afterCommit` 里做数据写入，必须 `REQUIRES_NEW`（见 7.3 第 2 点）。**
+  更普遍的一课：**"实测能跑通"不等于"语义正确"**。依赖未定义行为的代码会在升级/换并发模型时随机失效。
+- **坑39：验证"索引有没有更新"时，不能只看 title，也不能用 `score_threshold: 0`。**
+  更新资料时新旧文档**同名**（`m7__…`），只看 title 会以为"旧内容还在"；
+  而 `score_threshold: 0.0` 会让 MimirQ 把不相关片段也返回（实测无关问题也给出 0.59 分）。
+  我因此一度误判"先删后建没清干净旧向量"。**正确做法是比对返回的 `content`**：
+  改内容后查旧关键词，返回的是**新内容**（`含旧内容A=False`）→ 旧向量确实已清。
+  这次的教训是：**测试方法本身也会产生假阳性**，结论要落在能区分假设的证据上。
+- **坑40：迁移 Docker 栈时，决定数据卷复用与否的是 project name，不是目录。**
+  `docker-compose.lite.yml` 首行 `name: ${COMPOSE_PROJECT_NAME:-mimirq}`，
+  且 `docker/.env` 不存在 → 无论从哪个目录启动，project 都是 `mimirq`，
+  卷名固定为 `mimirq_postgres_data` / `mimirq_vector_data` / `mimirq_upload_data`。
+  所以"换目录重建镜像"**不会丢数据**（本次迁移后 dataset UUID 与 2 条文档原样保留，也就省掉了重新灌库）。
+  前提是 `down` 不带 `-v`。
+
+### 7.5 已知边界
+
+1. **灌库是同步等待的**：资料保存请求会等 MimirQ 写完（本地实测 449ms，可接受）。
+   若以后接远程 MimirQ 或批量导入，应改成队列异步，避免上传接口被网络拖长。
+2. **embedding 仍是 `deterministic_test`**（哈希向量）。换真模型前，
+   `relevance` 只有相对意义；且 `score_threshold` 调成 0 会返回大量噪声片段。
+   换模型后**必须重建索引**（MimirQ 硬要求），两端的资料也要重灌。
+3. **MimirQ 的 `course-{courseId}` dataset 需要 30s 响应缓存过期才会看到最新结果**，
+   自动化测试里查完就断言会误判（见坑39）。
 

@@ -4,8 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.trainereval.common.exception.BusinessException;
 import com.trainereval.common.exception.ErrorCode;
 import com.trainereval.common.util.SecurityUtils;
-import com.trainereval.rag.mapper.RagChunkMapper;
-import com.trainereval.rag.service.ChunkingService;
+import com.trainereval.rag.service.RagIndexSyncService;
 import com.trainereval.training.dto.TraChapterForm;
 import com.trainereval.training.dto.TraMaterialForm;
 import com.trainereval.training.entity.TraChapter;
@@ -83,10 +82,7 @@ public class TraCourseContentService {
      * 课程资料管理本身不能因此起不来。配合下面的 null 判断使用。
      */
     @Autowired(required = false)
-    private ChunkingService chunkingService;
-
-    @Autowired(required = false)
-    private RagChunkMapper ragChunkMapper;
+    private RagIndexSyncService ragIndexSyncService;
 
     @Value("${app.upload.path:D:/trainer-eval/uploads}")
     private String uploadPath;
@@ -219,8 +215,8 @@ public class TraCourseContentService {
 
         materialMapper.deleteById(materialId);
         deleteMaterialProgress(materialId);
-        // 资料删了，索引也要清掉，否则会搜到已删除的内容
-        removeRagIndex(materialId);
+        // 资料删了，索引也要清掉，否则会搜到已删除的内容（本地 + MimirQ 两套）
+        removeRagIndex(materialId, chapter.getCourseId());
         refreshChapterMaterialCount(chapter.getId());
         refreshCourseEnrollmentProgress(chapter.getCourseId());
     }
@@ -671,60 +667,91 @@ public class TraCourseContentService {
     // ------------------------------------------------------------------ RAG 索引联动
 
     /**
-     * 资料落库后同步切块索引。
+     * 资料落库后同步"两套索引"：本地切块 + MimirQ 知识库。
      * <p>
-     * 为什么放在"事务提交之后"执行，而不是在这里直接调 chunkingService：
+     * 为什么放在"事务提交之后"执行，而不是在这里直接调同步服务：
      * <ol>
-     *   <li>{@code ChunkingService.rebuildMaterial} 自带 {@code @Transactional}。若在当前事务中直接调用，
-     *       它一旦抛异常，Spring 会把<b>外层</b>事务标记成 rollback-only —— 这里就算 catch 住，
-     *       外层 commit 时仍会抛 {@code UnexpectedRollbackException}，"索引失败"会把"资料保存"一起拖垮。</li>
+     *   <li>在业务事务内直接调用时，被调用的 {@code @Transactional} 方法一旦抛异常，
+     *       Spring 会把<b>外层</b>事务标记成 rollback-only —— 这里就算 catch 住，
+     *       外层 commit 时仍会抛 {@code UnexpectedRollbackException}，
+     *       "索引失败"最终把"资料保存"一起拖垮。（单纯 try/catch 是挡不住的。）</li>
      *   <li>索引是派生数据：允许失败、允许延迟，事后可用 {@code POST /api/v1/rag/reindex} 重建。
      *       业务数据（资料本身）不能因为索引失败而回滚。</li>
      * </ol>
+     * 同步服务内部再用 {@code REQUIRES_NEW} 保证写入真的落库（原因见该类注释）。
      */
     private void syncRagIndex(TraMaterial material) {
         if (material == null || material.getId() == null) {
             return;
         }
+        Long courseId = resolveCourseId(material.getChapterId());
+        Long materialId = material.getId();
+        String title = material.getTitle();
+
         afterCommit(() -> {
-            if (chunkingService == null) {
+            if (ragIndexSyncService == null) {
                 return;
             }
+            // 第一步：本地切块。它是"事实"，失败就没必要推外部（推了也是旧的）
             try {
-                int chunks = chunkingService.rebuildMaterial(material);
-                log.info("RAG 索引已同步：materialId={}, title={}, chunks={}",
-                        material.getId(), material.getTitle(), chunks);
+                int chunks = ragIndexSyncService.rebuildLocalChunks(material);
+                log.info("RAG 本地索引已同步：materialId={}, title={}, chunks={}", materialId, title, chunks);
             } catch (Exception e) {
-                // 只记警告：员工暂时搜不到这条新资料，但资料已保存成功，可手动重建
-                log.warn("RAG 索引同步失败（不影响资料保存），materialId={}，可调用 /api/v1/rag/reindex 重建：{}",
-                        material.getId(), e.toString());
+                log.warn("RAG 本地索引同步失败（不影响资料保存），materialId={}，"
+                        + "可调用 /api/v1/rag/reindex 重建：{}", materialId, e.toString());
+                return;
+            }
+            // 第二步：推给 MimirQ。失败只降级为"这条资料暂时只能靠本地检索到"
+            try {
+                ragIndexSyncService.pushToMimirQ(materialId, courseId, title);
+            } catch (Exception e) {
+                log.warn("推送到 MimirQ 失败（该资料仍可通过本地检索搜到），materialId={}：{}",
+                        materialId, e.toString());
             }
         });
     }
 
-    /** 资料删除后清掉索引，否则员工会搜到已删除的内容。 */
-    private void removeRagIndex(Long materialId) {
+    /** 资料删除后清掉两套索引，否则员工会搜到已删除的内容。 */
+    private void removeRagIndex(Long materialId, Long courseId) {
         if (materialId == null) {
             return;
         }
         afterCommit(() -> {
-            if (ragChunkMapper == null) {
+            if (ragIndexSyncService == null) {
                 return;
             }
             try {
-                int removed = ragChunkMapper.deleteByMaterialId(materialId);
+                int removed = ragIndexSyncService.removeLocalChunks(materialId);
                 if (removed > 0) {
-                    log.info("RAG 索引已清理：materialId={}, chunks={}", materialId, removed);
+                    log.info("RAG 本地索引已清理：materialId={}, chunks={}", materialId, removed);
                 }
             } catch (Exception e) {
-                log.warn("RAG 索引清理失败，materialId={}：{}", materialId, e.toString());
+                log.warn("RAG 本地索引清理失败，materialId={}：{}", materialId, e.toString());
+            }
+            try {
+                ragIndexSyncService.removeFromMimirQ(materialId, courseId);
+            } catch (Exception e) {
+                log.warn("MimirQ 索引清理失败，materialId={}：{}", materialId, e.toString());
             }
         });
     }
 
+    /** 由章节反查课程，用于定位 MimirQ 侧的知识库（course-{courseId}）。 */
+    private Long resolveCourseId(Long chapterId) {
+        if (chapterId == null) {
+            return null;
+        }
+        TraChapter chapter = chapterMapper.selectById(chapterId);
+        return chapter == null ? null : chapter.getCourseId();
+    }
+
     /**
-     * 注册"事务提交后执行"。没有活跃事务时（例如单测直接调用）立即执行，
+     * 注册"业务事务提交后执行"。没有活跃事务时（例如单测直接调用）立即执行，
      * 避免出现"注册了却永远不触发"的静默失效。
+     * <p>
+     * 用 {@code afterCompletion + STATUS_COMMITTED} 而不是 {@code afterCommit}：
+     * 前者语义就是"事务已彻底结束"，此时在回调里开新事务语义最清晰；
+     * 且回滚时不会误执行（afterCommit 本来也不会，但这里多一层显式判断更不容易被后人改错）。
      */
     private void afterCommit(Runnable task) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -733,8 +760,10 @@ public class TraCourseContentService {
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
-            public void afterCommit() {
-                task.run();
+            public void afterCompletion(int status) {
+                if (status == TransactionSynchronization.STATUS_COMMITTED) {
+                    task.run();
+                }
             }
         });
     }

@@ -43,6 +43,13 @@ public interface RagChunkMapper extends BaseMapper<RagChunk> {
     @Delete("DELETE FROM rag_chunk WHERE material_id = #{materialId}")
     int deleteByMaterialId(@Param("materialId") Long materialId);
 
+    /**
+     * 按顺序取某条资料的全部切块正文，用于推送给外部知识库（MimirQ）。
+     * 显式 ORDER BY chunk_index：切块顺序决定 page_number 与引用序号，顺序错了引用就会错位。
+     */
+    @Select("SELECT content FROM rag_chunk WHERE material_id = #{materialId} ORDER BY chunk_index ASC")
+    List<String> listContentsByMaterial(@Param("materialId") Long materialId);
+
     /** 统计每个资料已切块数量，用于重建时判断是否需要重建。 */
     @Select("SELECT material_id, COUNT(*) AS n FROM rag_chunk GROUP BY material_id")
     List<java.util.Map<String, Object>> countGroupByMaterial();

@@ -61,6 +61,27 @@ public class MimirQProperties {
     /** knowledge_id 的命名模板，{courseId} 会被替换。 */
     private String knowledgeIdPattern = "course-{courseId}";
 
+    // ------------------------------------------------------------------ 写入（自动灌库）
+
+    /**
+     * 自动灌库总开关。
+     * <p>
+     * 与 {@code enabled}（检索）分开，因为两者的依赖不同：检索只要一个 API Key，
+     * 写入还需要<b>账号密码</b>去换 JWT。默认关，是为了"没配账号密码时不要每传一份资料就报一次错"。
+     */
+    private boolean ingestEnabled = false;
+
+    /** 写权限账号。MimirQ 的写入接口要登录换 JWT，Dify 的 API Key 在这里不通用。 */
+    private String username = "";
+
+    private String password = "";
+
+    private String loginPath = "/api/v1/auth/login";
+
+    private String datasetsPath = "/api/v1/datasets";
+
+    private String documentsPath = "/api/v1/documents";
+
     public String knowledgeIdFor(Long courseId) {
         return knowledgeIdPattern.replace("{courseId}", String.valueOf(courseId));
     }

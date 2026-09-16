@@ -28,6 +28,12 @@
 .PARAMETER Restart
     若 8080 / 5173 已被占用，先结束占用进程再启动（默认提示并退出，避免误杀）。
 
+.PARAMETER SkipMimirQ
+    跳过 MimirQ 知识库容器的启动。检索会自动降级为本地混合检索。
+
+.PARAMETER MimirQBuild
+    启动 MimirQ 时强制重建镜像。改了 mimirq/ 下的源码或依赖后才需要，日常启动不用。
+
 .EXAMPLE
     .\start.cmd
     .\start.ps1 -Restart
@@ -42,7 +48,9 @@ param(
     [switch]$FrontendOnly,
     [switch]$Online,
     [switch]$Reindex,
-    [switch]$Restart
+    [switch]$Restart,
+    [switch]$SkipMimirQ,
+    [switch]$MimirQBuild
 )
 
 # 本脚本大量调用外部命令（mysql / mvn / npm / taskkill），它们会把警告写到 stderr。
@@ -145,7 +153,7 @@ if (Test-Path $EnvFile) {
     foreach ($line in Get-Content $EnvFile) {
         $t = $line.Trim()
         if (-not $t -or $t.StartsWith("#")) { continue }
-        if ($t -match '^\s*(MIMIRQ_ENABLED|MIMIRQ_BASE_URL|MIMIRQ_API_KEY)\s*=\s*(.+)$') {
+        if ($t -match '^\s*(MIMIRQ_ENABLED|MIMIRQ_BASE_URL|MIMIRQ_API_KEY|MIMIRQ_INGEST_ENABLED|MIMIRQ_USERNAME|MIMIRQ_PASSWORD)\s*=\s*(.+)$') {
             $kvKey = $Matches[1]
             $kvVal = $Matches[2].Trim().Trim('"').Trim("'")
             Set-Item -Path "env:$kvKey" -Value $kvVal
@@ -158,6 +166,15 @@ if ($env:MIMIRQ_API_KEY) {
 } else {
     Write-Info "未配置 MIMIRQ_API_KEY：检索使用内置的本地混合检索（功能正常，只是不调外部知识库）。"
     Write-Info "        接入方式：在 .env.local 里加 MIMIRQ_API_KEY=<MimirQ 的 Dify key>"
+}
+# 写入侧（自动灌库）：检索只要 Key，写入要账号密码换 JWT，所以单独判断并单独提示。
+# 少了它不会报错，但"内训师上传 → MimirQ 侧也能搜到"就只剩本地方案。
+if ($env:MIMIRQ_INGEST_ENABLED -and $env:MIMIRQ_INGEST_ENABLED -notin @('false', '0') `
+        -and $env:MIMIRQ_USERNAME -and $env:MIMIRQ_PASSWORD) {
+    Write-Ok "已配置 MimirQ 自动灌库（账号 $($env:MIMIRQ_USERNAME)）—— 上传资料会自动同步进知识库"
+} else {
+    Write-Info "未配置 MimirQ 自动灌库（缺 MIMIRQ_USERNAME / MIMIRQ_PASSWORD）："
+    Write-Info "        资料仍会切块进本地索引、员工能搜到；只是不会同步进 MimirQ 知识库。"
 }
 
 # ---------------------------------------------------------------- 1. 环境自检
@@ -304,6 +321,63 @@ if (Test-Path $MysqlExe) {
         } else { Write-Warn2 "未找到 $schemaFile，跳过建表" }
     } else {
         Write-Ok "RAG 表已存在（保留现有切块与题集）"
+    }
+}
+
+# ---------------------------------------------------------------- 2.5 MimirQ 知识库
+# 设计取舍：**知识库起不来不能挡住培训系统启动**。
+# MimirQ 是派生能力（检索质量增强），后端在它不可用时会自动降级到本地混合检索，
+# 所以这里失败只警告、不 exit。反过来，如果把它做成硬依赖，
+# 一次 Docker 没启动就会让"登录/考试/阅卷"这些核心功能也起不来 —— 那是错的优先级。
+$MimirQCompose = Join-Path $Root "mimirq\docker\docker-compose.lite.yml"
+$MimirQEnv     = Join-Path $Root "mimirq\.env"
+if (-not $SkipMimirQ -and (Test-Path $MimirQCompose) -and -not (Test-Path $MimirQEnv)) {
+    # mimirq/.env 含密钥、被 git 忽略 —— 全新 clone 后不存在。
+    # 不先检查的话，compose 会在容器启动阶段报一堆变量缺失，排查成本高得多。
+    Write-Title "2.5 知识库服务（MimirQ）"
+    Write-Warn2 "缺少 mimirq\.env：跳过 MimirQ（检索会自动降级为本地混合检索，功能可用）"
+    Write-Info "        初始化：Copy-Item .\mimirq\.env.example .\mimirq\.env"
+    Write-Info "        必填 SECRET_KEY / INITIAL_ADMIN_* / DIFY_EXTERNAL_KNOWLEDGE_*，详见 mimirq\VENDORED.md"
+} elseif (-not $SkipMimirQ -and (Test-Path $MimirQCompose)) {
+    Write-Title "2.5 知识库服务（MimirQ）"
+
+    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+    if (-not $dockerCmd) {
+        Write-Warn2 "未找到 docker：跳过 MimirQ。检索会自动降级为本地混合检索（功能可用）"
+    } else {
+        # docker info 是判断"守护进程是否在跑"最便宜的方式（Docker Desktop 没启动时 compose 会直接报错）
+        & docker info 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn2 "Docker 守护进程未运行（Docker Desktop 没启动？）：跳过 MimirQ"
+            Write-Info "        启动 Docker Desktop 后重新运行本脚本即可；不影响其它功能。"
+        } else {
+            $running = & docker ps --filter "name=mimirq-mimirq-api" --format "{{.Names}}" 2>$null
+            if ($running) {
+                Write-Ok "MimirQ 容器已在运行"
+            } else {
+                Write-Info "正在启动 MimirQ 容器（首次或改动源码后需要构建，可能数分钟）..."
+                # 不用 --build：日常启动走已有镜像，秒级完成。
+                # 需要重建（改了 mimirq/ 下的源码或依赖）时用 -MimirQBuild。
+                $mqArgs = @("compose", "-f", $MimirQCompose, "up", "-d")
+                if ($MimirQBuild) { $mqArgs += "--build" }
+                & docker @mqArgs 2>&1 | ForEach-Object { if ($_ -notmatch '^\s*$') { Write-Verbose $_ } }
+            }
+
+            # 就绪等待：空库首次建表可能要好几分钟，所以给足时间；超时也只警告
+            $mqReady = $false
+            for ($i = 0; $i -lt 60; $i++) {
+                $code = & curl.exe -s -o NUL -w '%{http_code}' --max-time 5 `
+                    "http://127.0.0.1:8000/api/v1/health/ready" 2>$null
+                if ($code -eq '200') { $mqReady = $true; break }
+                Start-Sleep -Seconds 3
+            }
+            if ($mqReady) {
+                Write-Ok "MimirQ 已就绪（http://127.0.0.1:8000）"
+            } else {
+                Write-Warn2 "MimirQ 未在 180s 内就绪：本次检索走本地混合检索"
+                Write-Info "        排查：docker compose -f `"$MimirQCompose`" logs --tail 80 mimirq-api"
+            }
+        }
     }
 }
 

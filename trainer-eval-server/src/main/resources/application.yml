@@ -80,6 +80,16 @@ mimirq:
   failure-threshold: 3
   cooldown: 60s
   knowledge-id-pattern: course-{courseId}
+  # ------------------------------------------------------------------ 自动灌库（写入侧）
+  # 检索只要一个 API Key；写入要账号密码登录换 JWT，两者依赖不同，所以开关分开。
+  # 关闭时：资料仍会自动切块进本地索引，员工能搜到；只是拿不到 MimirQ 的混合召回+重排。
+  ingest:
+    enabled: ${MIMIRQ_INGEST_ENABLED:true}
+    username: ${MIMIRQ_USERNAME:}
+    password: ${MIMIRQ_PASSWORD:}
+  login-path: /api/v1/auth/login
+  datasets-path: /api/v1/datasets
+  documents-path: /api/v1/documents
 
 rag:
   security-trimming:
