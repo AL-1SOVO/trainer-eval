@@ -185,7 +185,7 @@ MimirQ(混合召回+重排) → 本地混合(ngram全文 + 子串 + RRF) → 子
 
 ## 五、MimirQ 实际部署记录 — 2026-09-16
 
-### 5.1 现在的状态：**栈已跑起来、数据已入库，但检索端点返回 403**
+### 5.1 现在的状态：**全链路已打通** ✅
 
 | 环节 | 状态 |
 | --- | --- |
@@ -194,15 +194,40 @@ MimirQ(混合召回+重排) → 本地混合(ngram全文 + 子串 + RRF) → 子
 | 镜像构建 | ✅ 成功（首次在 HF 模型下载处失败，重试即通过） |
 | 容器 | ✅ api / worker / postgres / redis **全部 healthy** |
 | dataset | ✅ `course-1` = `bc4eeab3-ce4c-4871-84e7-5a5cce043238` |
-| 文档入库 | ✅ 2 份（M3、M4），各 1 chunk，`status=completed`（10 秒内处理完） |
+| 文档入库 | ✅ 2 份（M3、M4），各 1 chunk，`status=completed` |
 | Dify 映射 | ✅ 已回填 `DIFY_EXTERNAL_KNOWLEDGE_MAP_JSON` 并重启 api |
-| **检索端点** | ❌ `POST /integrations/dify/retrieval` → **403 `Not a tenant member`** |
+| **检索端点** | ✅ `POST /integrations/dify/retrieval` → **200，返回 records** |
+| **Java 侧接入** | ✅ `/rag/search` 的 `backend=MIMIRQ`、`degraded=false`，引用为可点击的 `M4#0` |
 
-**唯一剩余阻塞**：Dify External Knowledge 端点的鉴权。已试过但无效：
-`DIFY_EXTERNAL_KNOWLEDGE_TENANT_ID=00000000-0000-0000-0000-000000000000`。
-从错误语义看（key 认得、但账号不是租户成员），下一步应查
-`app/api/v1/integrations_dify.py` 里 API key → tenant/account 的映射逻辑，
-或改用 MimirQ 原生检索端点绕过这层鉴权。
+**403 的根因与修法**：Dify 端点用的是**合成账号** —— 见 `external_api.py:1045`：
+`account_id = DIFY_EXTERNAL_KNOWLEDGE_ACCOUNT_ID or "system:dify"`，
+而 `system:dify` 不在 `tenant_members` 表里 → `Not a tenant member`。
+**修法（配置驱动，不动数据库）**：把 `DIFY_EXTERNAL_KNOWLEDGE_ACCOUNT_ID` 设为 admin 的真实 user_id
+（`b5060600-7626-41d4-a4dc-a7675d1c4648`），复用其已有的 owner 成员关系。
+更"生产干净"的替代方案：往 `tenant_members` 插一条 `system:dify` 的成员记录，让审计归属独立。
+
+**实测的端到端结果**：
+
+```
+/rag/search  钓鱼邮件怎么防范   -> backend=MIMIRQ  M4#0  materialId=4  score=0.15
+/rag/search  数据保护三大原则   -> backend=MIMIRQ  M3#0  materialId=3  score=0.21
+/rag/search  勒索软件怎么防范   -> backend=MIMIRQ  M4#0  materialId=4  score=0.13
+
+Golden 评测（20 题 topK=5）
+  CHAIN（走 MimirQ）  hitRate=1.0000  recall=1.0000  mrr=1.0000  miss=0
+  LIKE_BASELINE       hitRate=0.4500  recall=0.4500  mrr=0.4500
+  提升                +0.55
+```
+
+### 5.1.1 Java 侧接入过程中修掉的两个真实缺陷
+
+1. **`resolveTargetCourses` 漏了内容过滤**：注释写着"反推有内容的课程"，但查询没加
+   `content is not null` 条件 → 对只有占位资料（"复习"、"video" 这类空正文）的课程也发请求，
+   MimirQ 返回 `2001 Dify knowledge mapping not found`。
+   修复：加 `.isNotNull(content).ne(content, "")`。
+2. **缺少"部分可用"容错**：原先**任一课程失败就让整次检索降级** —— 一门课没建知识库就打挂了整条链路。
+   修复：逐课程捕获异常并跳过，**只有所有课程都失败**才抛错交给上层降级/熔断；
+   部分失败记日志并返回已取到的结果。这是企业级集成必须有的容错姿态。
 
 **Java 侧无需改代码**：`mimirq.enabled` 已是 `true`；端点一旦通，
 `/rag/health` 的 `circuitOpen` 会转 false、`/rag/search` 的 `backend` 会变成 `MIMIRQ`。
@@ -290,13 +315,45 @@ curl -s -X POST http://localhost:8000/api/v1/documents/manual \
   导致"一行一个 JSON"变成多行、`ConvertFrom-Json` 报"应为 ':' 或 '}'"。加 `--raw` 解决。
 - **坑23：PowerShell 5.1 不支持 `??`**；也不要把 hashtable 传给函数再 `ConvertTo-Json`
   （会产出非法 body，服务端报 `json_invalid: Extra data`）——**显式拼 JSON 字符串最稳**。
+- **坑24：Dify 端点用的是合成账号 `system:dify`，而它不在 `tenant_members` 里。**
+  见 `external_api.py:1045`。表现为 403 `Not a tenant member`。
+  修法：设 `DIFY_EXTERNAL_KNOWLEDGE_ACCOUNT_ID` = 一个真实存在的租户成员 user_id。
+- **坑25：MimirQ 的 Dify 响应**不透传**上传时写在 chunk 上的自定义 metadata。**
+  返回的 `metadata` 只有它自己的字段（`document_id`/`chunk_id`/`chunk_index`/`hit_type`…），
+  我上传时写的 `material_id` 拿不到。所以**不能靠 metadata 做资料映射**，
+  只能靠 `title`（文档名）。→ 上传时**文档名就用资料标题**，别用 `m3.txt` 这种。
+  （更稳的做法是上传后记录 `document_id → material_id` 的映射存到 Java 侧配置里，
+  但那引入配置耦合；用有意义的文档名更自然。）
+- **坑26：文档名带扩展名，标题匹配会失配。**
+  MimirQ 返回的 `title` 是 `数据保护三大原则详解.txt`，而本地 `byTitle` 的键是无扩展名的资料标题。
+  需要在匹配前剥掉尾部扩展名（`replaceAll("\\.[A-Za-z0-9]{1,6}$", "")`）。
+- **坑27：MimirQ 的 access token 只有 30 分钟（`expires_in: 1800`）。**
+  脚本跑久一点就会 `AUTHENTICATION_ERROR: Token expired`，
+  且**表现是"操作全部静默失败"**（我这边一度以为删除和上传都没生效）。
+  长脚本要重新登录，或把 token 过期单独判断出来。
+- **坑28：接了外部知识库之后，"CHAIN 指标反而变 0" 是一个有价值的信号，不是退化。**
+  首次把 CHAIN 指向 MimirQ 时 golden 掉到 `hitRate=0.0000` ——
+  因为 MimirQ 命中无法映射回 `material_id`（坑25/26），评测按 materialId 比对自然全 miss。
+  **这正是评测的价值**：它当场指出"映射断了"，而不是让人误以为"接了 MimirQ 就变好了"。
+  映射修好后即回到 `1.0000`。
 
-### 5.5 下一步（按顺序）
+### 5.5 下一步
 
-1. **解决 403 `Not a tenant member`**：查 `app/api/v1/integrations_dify.py` 的 API key → tenant/account 映射；
-   或改用 MimirQ 原生检索端点（`/api/v1/rag/*`、`/retrieval/*`）绕过 Dify 兼容层鉴权。
-2. 检索通了之后，给 Java 侧配上 `MIMIRQ_API_KEY`（`application.yml` 的 `mimirq.api-key` 或环境变量），
-   **不需要改代码**。
-3. 重跑 `/api/v1/rag/health`（`circuitOpen` 应为 false）、`/rag/search`（`backend` 应为 `MIMIRQ`）、`/rag/eval`。
-4. 要真实语义检索质量时，把 `EMBEDDING_PROVIDER` 换成 `openai_compatible` + SiliconFlow `BAAI/bge-m3`，
-   **并重建索引**（换 embedding 模型必须重建，MimirQ 的硬要求）。
+前 3 步已完成（403 已解决、Java 已接入、指标已恢复 1.0000）。**剩下的核心是"质量"而不是"连通"**：
+
+1. **换真实 embedding（当前最大的质量短板）。**
+   现在用的是 `deterministic_test` —— 哈希向量，**排序没有语义意义**。
+   注意：实测中发现 MimirQ 的 `deterministic_test` 排序**并非完全随机**，
+   它仍能排对（对话里三题 top-1 都对），但那更像是 BM25/词面通道在起作用，
+   而不是语义。**要真正验证"语义检索"，必须换成真模型**：
+   - 改 `EMBEDDING_PROVIDER=openai_compatible` + `EMBEDDING_MODEL=BAAI/bge-m3`
+     + `EMBEDDING_API_BASE=https://api.siliconflow.cn/v1` + `EMBEDDING_API_KEY=<SiliconFlow key>`
+   - **必须重建索引**（MimirQ 硬要求：换 embedding 模型后已有向量全部失效）
+   - 重建后重跑 `/rag/eval`，对比 `deterministic_test` 与 `bge-m3` 两轮指标
+2. **把 MimirQ 的评估能力用起来**：MimirQ 自带 RAGAS / 回归门禁（方案文档阶段五提到的），
+   可以和我这边 20 题的 HitRate/Recall/MRR 做交叉验证。
+3. **补解析层**：`tra_material` 里 DOCUMENT/VIDEO 两类没有正文，
+   接 MimirQ 的解析管道（DeepDoc/MinerU）才能真正解决——这是召回缺口的根因。
+4. **Java 侧产物清理**：`agent/tools/MimirQRetriever.java` 是并行开发产生的、
+   **完全没有接线**的重复实现（只有 `@Slf4j`，无 `@Component`/`@Bean`，全项目 0 处引用），
+   与现在的 `rag/mimirq/MimirQClient` + `RagRetrievalFacade` 功能重叠，建议删除以免误导。

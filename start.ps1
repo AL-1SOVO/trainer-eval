@@ -139,6 +139,27 @@ if ($ApiKey) {
     Write-Warn2 "        （.env.local 已在 .gitignore 中，不会入库）"
 }
 
+# MimirQ 知识库配置。不注入的话后端拿不到 key，每次检索都要白等一次连接再降级到本地 ——
+# 服务其实在跑，却一直用不上。
+if (Test-Path $EnvFile) {
+    foreach ($line in Get-Content $EnvFile) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith("#")) { continue }
+        if ($t -match '^\s*(MIMIRQ_ENABLED|MIMIRQ_BASE_URL|MIMIRQ_API_KEY)\s*=\s*(.+)$') {
+            $kvKey = $Matches[1]
+            $kvVal = $Matches[2].Trim().Trim('"').Trim("'")
+            Set-Item -Path "env:$kvKey" -Value $kvVal
+        }
+    }
+}
+if ($env:MIMIRQ_API_KEY) {
+    $mqBase = if ($env:MIMIRQ_BASE_URL) { $env:MIMIRQ_BASE_URL } else { "http://localhost:8000" }
+    Write-Ok "已配置 MimirQ（$mqBase，key 长度 $($env:MIMIRQ_API_KEY.Length)）—— 检索走知识库服务"
+} else {
+    Write-Info "未配置 MIMIRQ_API_KEY：检索使用内置的本地混合检索（功能正常，只是不调外部知识库）。"
+    Write-Info "        接入方式：在 .env.local 里加 MIMIRQ_API_KEY=<MimirQ 的 Dify key>"
+}
+
 # ---------------------------------------------------------------- 1. 环境自检
 Write-Title "1. 环境自检"
 $failed = $false

@@ -126,31 +126,83 @@ public class RagRetrievalFacade {
         Map<String, TraMaterial> byTitle = loadMaterialsByTitle(courses);
 
         List<RetrievalHit> merged = new ArrayList<>();
+        int attempted = 0;
+        int failed = 0;
+        RuntimeException lastError = null;
+
         for (Long courseId : courses) {
-            // Dify 协议一次只能查一个 knowledge_id，因此多课程要发多次请求
-            List<MimirQClient.MimirQRecord> records =
-                    mimirqClient.retrieveOne(mimirqProperties.knowledgeIdFor(courseId), query);
+            attempted++;
+            List<MimirQClient.MimirQRecord> records;
+            try {
+                // Dify 协议一次只能查一个 knowledge_id，因此多课程要发多次请求
+                records = mimirqClient.retrieveOne(mimirqProperties.knowledgeIdFor(courseId), query);
+            } catch (RuntimeException e) {
+                // 部分可用：某门课还没建知识库（MimirQ 返回 2001 mapping not found）或临时出错，
+                // 不应让整次检索失败。跳过它，继续查其它课程。
+                failed++;
+                lastError = e;
+                log.debug("课程 {} 的知识库检索失败，跳过: {}", courseId, e.getMessage());
+                continue;
+            }
             int index = 0;
             for (MimirQClient.MimirQRecord record : records) {
                 merged.add(toHit(record, byTitle, courseId, index++));
             }
         }
 
+        // 只有"所有课程都失败"才视为知识库不可用（交给上层降级并触发熔断）；
+        // 部分失败则返回已取到的结果，避免一门课拖垮整次检索。
+        if (attempted > 0 && failed == attempted && lastError != null) {
+            throw lastError;
+        }
+        if (failed > 0) {
+            log.info("MimirQ 部分课程检索失败（{}/{}），已返回其余结果", failed, attempted);
+        }
+
         merged.sort(Comparator.comparingDouble(RetrievalHit::score).reversed());
         return diversify(merged, topK);
     }
 
-    /** MimirQ 命中 → 统一 RetrievalHit。能按标题对上本地资料时给出可跳转的引用。 */
+    /**
+     * MimirQ 命中 → 统一 RetrievalHit。
+     * <p>
+     * 资料映射优先用 <b>稳定 ID</b>（上传时写入 chunk metadata 的 {@code material_id}），
+     * 标题匹配只作兜底。原因：MimirQ 的 record.title 是"文档名"，取决于导入时的 filename，
+     * 与 tra_material.title 不一定一致（实测上传为 {@code m4.txt} 时就对不上，
+     * 导致引用退化成不可跳转的 MQ- 格式）。用 ID 映射既稳又能给出可点击的 M{id}#{idx}。
+     */
     private RetrievalHit toHit(MimirQClient.MimirQRecord record, Map<String, TraMaterial> byTitle,
                                Long courseId, int index) {
         String title = record.title() == null ? "" : record.title();
-        TraMaterial material = title.isBlank() ? null : byTitle.get(title.trim());
 
-        Long materialId = material == null ? null : material.getId();
+        TraMaterial material = null;
+        Long materialId = extractMaterialId(record.metadata());
+        if (materialId != null) {
+            material = materialMapper.selectById(materialId);
+        }
+        if (material == null && !title.isBlank()) {
+            // 兜底：按标题匹配（适用于以资料标题命名的知识库文档）
+            material = byTitle.get(title.trim());
+            if (material == null) {
+                // 知识库文档名通常带扩展名（如 "数据保护三大原则详解.txt"），
+                // 去掉扩展名后再匹配一次，否则永远对不上 byTitle（键是资料标题、无扩展名）
+                String noExt = title.trim().replaceAll("\\.[A-Za-z0-9]{1,6}$", "").trim();
+                if (!noExt.isEmpty()) {
+                    material = byTitle.get(noExt);
+                }
+            }
+        }
+        if (material != null) {
+            materialId = material.getId();
+        } else {
+            materialId = null;
+        }
+
         Long chapterId = material == null ? null : material.getChapterId();
         Long resolvedCourseId = courseId;
         String chapterTitle = "";
         String courseName = "";
+        String displayTitle = material != null && material.getTitle() != null ? material.getTitle() : title;
         if (material != null && material.getChapterId() != null) {
             TraChapter chapter = chapterMapper.selectById(material.getChapterId());
             if (chapter != null) {
@@ -162,8 +214,8 @@ public class RagRetrievalFacade {
                 }
             }
         }
-        // 引用编号：资料对得上时沿用 M{id}#{idx} 规则，前端可跳转；
-        // 对不上（例如 MimirQ 里是独立导入的文档）退化为 MQ- 前缀，仅作展示
+        // 引用编号：资料对得上时沿用 M{id}#{idx} 规则（前端可跳转）；
+        // 对不上（例如 MimirQ 里是独立导入、本地无对应资料的文档）退化为 MQ- 前缀，仅作展示
         String citation = materialId != null
                 ? RetrievalHit.buildCitation(materialId, index)
                 : "MQ-" + resolvedCourseId + "-" + index;
@@ -172,8 +224,27 @@ public class RagRetrievalFacade {
         String snippet = content.length() <= 300 ? content : content.substring(0, 300) + "…";
 
         return new RetrievalHit(citation, null, materialId, resolvedCourseId, chapterId, index,
-                title.isBlank() ? "知识库片段" : title, courseName, chapterTitle, snippet,
+                displayTitle.isBlank() ? "知识库片段" : displayTitle, courseName, chapterTitle, snippet,
                 record.score(), "MIMIRQ");
+    }
+
+    /** 从 MimirQ 返回的 metadata 里取 material_id（可能是数字或字符串）。 */
+    private Long extractMaterialId(Map<String, Object> metadata) {
+        if (metadata == null || metadata.isEmpty()) {
+            return null;
+        }
+        Object raw = metadata.get("material_id");
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(raw).trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private Set<Long> resolveTargetCourses(KnowledgeAccessService.AccessScope scope, Long requestedCourseId) {
@@ -181,9 +252,14 @@ public class RagRetrievalFacade {
             return Set.of(requestedCourseId);
         }
         if (scope.unrestricted()) {
-            // 系统/员工上下文且未指定课程：用资料表反推有内容的课程，避免对不存在的 dataset 发请求
+            // 系统/员工上下文且未指定课程：用资料表反推"真正有正文"的课程。
+            // 必须过滤空正文 —— 否则会对只有占位资料（如"复习"、"video"这类空内容）的课程
+            // 也发请求，而 MimirQ 侧没有对应 knowledge 映射，会返回 2001 mapping not found。
             List<TraMaterial> materials = materialMapper.selectList(
-                    new LambdaQueryWrapper<TraMaterial>().select(TraMaterial::getChapterId));
+                    new LambdaQueryWrapper<TraMaterial>()
+                            .select(TraMaterial::getChapterId)
+                            .isNotNull(TraMaterial::getContent)
+                            .ne(TraMaterial::getContent, ""));
             Set<Long> courseIds = new LinkedHashSet<>();
             for (TraMaterial material : materials) {
                 if (material.getChapterId() == null) {
