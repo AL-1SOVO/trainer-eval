@@ -77,13 +77,53 @@ public class SysMenuServiceImpl extends ServiceImpl<SysMenuMapper, SysMenu> impl
                .eq(SysMenu::getVisible, 1)
                .eq(SysMenu::getStatus, 1)
                .orderByAsc(SysMenu::getSortOrder);
-        List<SysMenu> menus = baseMapper.selectList(wrapper);
+        List<SysMenu> menus = new ArrayList<>(baseMapper.selectList(wrapper));
+
+        // 修复：补齐"父节点不在授权集合里"的祖先菜单。
+        // 原实现直接 buildTree(menus, 0L) 只挑 parentId==0 的节点，
+        // 而 sys_role_menu 通常只授叶子菜单（如 ROLE_EMPLOYEE 只有 menu 6「AI学习助手」，
+        // 其 parent_id=1「员工门户」并未授予）→ 整棵子树被丢弃 → 侧边栏空白，
+        // 员工登录后看不到任何菜单（包括 AI 学习助手入口）。
+        // 这里向上补齐祖先，让层级结构完整。
+        Set<Long> present = menus.stream().map(SysMenu::getId).collect(Collectors.toSet());
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            Set<Long> missingParentIds = menus.stream()
+                    .map(SysMenu::getParentId)
+                    .filter(pid -> pid != null && pid != 0L && !present.contains(pid))
+                    .collect(Collectors.toSet());
+            if (missingParentIds.isEmpty()) {
+                break;
+            }
+            for (Long pid : missingParentIds) {
+                present.add(pid);           // 无论祖先是否可用，都先标记已处理，避免死循环
+                SysMenu parent = baseMapper.selectById(pid);
+                if (parent == null) {
+                    continue;
+                }
+                // 祖先同样按目录/菜单 + 可见 + 启用过滤，避免把停用目录带出来
+                boolean usable = parent.getMenuType() != null
+                        && ("M".equals(parent.getMenuType()) || "C".equals(parent.getMenuType()))
+                        && Integer.valueOf(1).equals(parent.getVisible())
+                        && Integer.valueOf(1).equals(parent.getStatus());
+                if (usable) {
+                    menus.add(parent);
+                    grew = true;
+                }
+            }
+        }
+
         return buildTree(menus, 0L);
     }
 
     private List<SysMenu> buildTree(List<SysMenu> list, Long parentId) {
+        Set<Long> ids = list.stream().map(SysMenu::getId).collect(Collectors.toSet());
         return list.stream()
-                .filter(m -> m.getParentId().equals(parentId))
+                // 父节点不在集合里的一律当作根节点，保证任何情况下都不会整棵子树消失
+                .filter(m -> parentId == 0L
+                        ? (m.getParentId() == null || m.getParentId() == 0L || !ids.contains(m.getParentId()))
+                        : parentId.equals(m.getParentId()))
                 .peek(m -> m.setChildren(buildTree(list, m.getId())))
                 .collect(Collectors.toList());
     }
