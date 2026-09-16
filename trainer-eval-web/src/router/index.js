@@ -106,6 +106,11 @@ router.beforeEach(async (to, from, next) => {
     return
   }
 
+  // 菜单由管理员在后台维护：改完菜单不该要求每个用户重新登录/整页刷新才能看到。
+  // 这里做 60s 节流的补偿刷新，顺带兜住"首次加载失败导致侧边栏一直空着"的情况。
+  // 不 await：菜单只是导航的附属信息，不值得拖慢每一次跳转。
+  appStore.refreshMenusIfStale(60000)
+
   next()
 })
 
