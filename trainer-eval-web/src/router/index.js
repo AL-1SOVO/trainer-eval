@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
+import { homePath } from '@/utils/home'
 
 const routes = [
   {
@@ -82,7 +83,8 @@ router.beforeEach(async (to, from, next) => {
 
   if (to.path === '/login') {
     if (userStore.token) {
-      next('/employee/courses')
+      // 已登录时访问 /login：回到该角色自己的仪表盘，而不是固定去员工学习中心
+      next(homePath(userStore.roles))
       return
     }
     next()

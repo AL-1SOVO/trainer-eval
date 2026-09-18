@@ -27,6 +27,7 @@ INSERT INTO sys_user_role (user_id, role_id) VALUES (1, 3);
 INSERT INTO sys_menu (id, parent_id, menu_name, menu_type, path, component, permission, icon, sort_order) VALUES
 -- Employee Portal
 (1, 0, '员工门户', 'M', '/employee', NULL, NULL, 'Monitor', 1),
+(8, 1, '学习仪表盘', 'C', 'dashboard', 'employee/dashboard/EmployeeDashboard', NULL, 'Odometer', 0),
 (2, 1, '学习中心', 'C', 'courses', 'employee/course/CourseList', NULL, 'Reading', 1),
 (3, 1, '我的课程', 'C', 'my-courses', 'employee/mycourse/MyCourseList', NULL, 'Collection', 2),
 (4, 1, '我的考试', 'C', 'my-exams', 'employee/exam/ExamList', NULL, 'EditPen', 3),
@@ -38,6 +39,7 @@ INSERT INTO sys_menu (id, parent_id, menu_name, menu_type, path, component, perm
 
 -- Trainer Portal
 (10, 0, '内训师门户', 'M', '/trainer', NULL, NULL, 'UserFilled', 2),
+(16, 10, '培训概览', 'C', 'dashboard', 'trainer/dashboard/TrainerDashboard', NULL, 'DataLine', 0),
 (11, 10, '课程管理', 'C', 'course-manage', 'trainer/course/CourseManage', NULL, 'Document', 1),
 (12, 10, '题库管理', 'C', 'question-bank', 'trainer/question/QuestionList', NULL, 'Tickets', 2),
 (13, 10, '试卷管理', 'C', 'paper-manage', 'trainer/paper/PaperList', NULL, 'Files', 3),
@@ -46,6 +48,7 @@ INSERT INTO sys_menu (id, parent_id, menu_name, menu_type, path, component, perm
 
 -- Manager Portal
 (20, 0, '管理后台', 'M', '/manager', NULL, NULL, 'Setting', 3),
+(32, 20, '管理仪表盘', 'C', 'dashboard', 'manager/dashboard/ManagerDashboard', NULL, 'Odometer', 0),
 (21, 20, '用户管理', 'C', 'users', 'manager/user/UserList', 'sys:user:list', 'User', 1),
 (22, 21, '新增用户', 'F', NULL, NULL, 'sys:user:add', NULL, 1),
 (23, 21, '编辑用户', 'F', NULL, NULL, 'sys:user:edit', NULL, 2),
@@ -62,6 +65,17 @@ INSERT INTO sys_menu (id, parent_id, menu_name, menu_type, path, component, perm
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 3, id FROM sys_menu;
 
--- 员工 / 内训师：知识搜索（员工查资料、内训师上传后自查"员工能不能搜到"）
+-- 员工：员工门户下的全部页面（含仪表盘）
+-- 注意菜单 1 是父目录，必须一起授权。
 INSERT INTO sys_role_menu (role_id, menu_id)
-SELECT r.id, 7 FROM sys_role r WHERE r.role_name IN ('员工', '内训师');
+SELECT r.id, m.id
+  FROM sys_role r JOIN sys_menu m ON m.id IN (1, 2, 3, 4, 5, 6, 7, 8)
+ WHERE r.role_code = 'ROLE_EMPLOYEE';
+
+-- 内训师：既有员工门户（内训师本身也是学习者），也有内训师门户
+-- 修复前只授权了菜单 7 —— 纯内训师账号看不到自己的门户，
+-- 因为 admin 同时持有三个角色，这个问题被完全掩盖了。
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT r.id, m.id
+  FROM sys_role r JOIN sys_menu m ON m.id IN (1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16)
+ WHERE r.role_code = 'ROLE_TRAINER';

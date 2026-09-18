@@ -66,6 +66,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
 import { getDeptTree } from '@/api/dept'
+import { homePath } from '@/utils/home'
 import { ElMessage } from 'element-plus'
 
 const router = useRouter()
@@ -115,7 +116,10 @@ async function handleLogin() {
     await userStore.login(loginForm)
     await appStore.loadMenus()
     ElMessage.success('登录成功')
-    const redirect = route.query.redirect || '/employee/courses'
+    // 落地页按角色决定：管理员/内训师各自回自己的仪表盘，员工回学习仪表盘。
+    // 原来固定跳 /employee/courses —— 对管理员来说是"别人的学习中心"，
+    // 侧边栏里也不会有对应高亮项。
+    const redirect = route.query.redirect || homePath(userStore.roles)
     router.push(redirect)
   } catch (error) {
     ElMessage.error(error.message || '登录失败')
