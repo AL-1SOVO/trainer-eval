@@ -114,6 +114,7 @@
                   </div>
                   <div class="header-actions">
                     <el-button link type="primary" @click="openChapterDialog(chapter)">编辑章节</el-button>
+                    <el-button link type="success" @click="openIngestDialog(chapter)">上传并建索引</el-button>
                     <el-button link type="primary" @click="openMaterialDialog(chapter)">新增资料</el-button>
                     <el-popconfirm title="删除章节会同时删除其下所有资料，确认继续吗？" @confirm="handleDeleteChapter(chapter.id)">
                       <template #reference>
@@ -242,6 +243,75 @@
         <el-button type="primary" :loading="savingMaterial" @click="handleSaveMaterial">保存资料</el-button>
       </template>
     </el-dialog>
+
+    <!-- 上传并建索引：一步把文件变成"能被搜到"的资料 -->
+    <el-dialog v-model="ingestDialogVisible" title="上传文件并建立检索索引" width="640px">
+      <el-alert type="info" :closable="false" show-icon class="ingest-tip"
+                title="上传后系统会自动抽取正文、切块，并同步到知识库，员工即可在「知识搜索」中查到。" />
+      <el-form label-width="90px" class="ingest-form">
+        <el-form-item label="目标章节">
+          <el-input :model-value="ingestChapterTitle" disabled />
+        </el-form-item>
+        <el-form-item label="选择文件">
+          <el-upload
+            :auto-upload="false"
+            :limit="1"
+            :on-change="handleIngestFileChange"
+            :on-remove="() => { ingestFile = null }"
+            :file-list="ingestFileList"
+          >
+            <el-button>选择文件</el-button>
+            <template #tip>
+              <div class="upload-tip">
+                支持 {{ (ingestCapabilities.formats || []).join(' / ') }}，单个文件不超过 50MB
+              </div>
+            </template>
+          </el-upload>
+        </el-form-item>
+        <el-form-item label="资料标题">
+          <el-input v-model="ingestForm.title" clearable placeholder="留空则用文件名（不含扩展名）" />
+        </el-form-item>
+        <el-form-item label="资料类型">
+          <el-select v-model="ingestForm.materialType" clearable placeholder="留空则按扩展名自动判断" style="width:100%">
+            <el-option label="文档" value="DOCUMENT" />
+            <el-option label="课件" value="PPT" />
+            <el-option label="视频" value="VIDEO" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+
+      <!-- 结果如实回显：抽了多少字、切了几块、知识库有没有同步成功 -->
+      <el-card v-if="ingestResult" shadow="never" class="ingest-result">
+        <div class="ingest-result-row">
+          <el-tag :type="ingestResult.searchable ? 'success' : 'danger'" size="small">
+            {{ ingestResult.searchable ? '已可被检索' : '未被索引' }}
+          </el-tag>
+          <span class="ingest-result-text">
+            格式 {{ ingestResult.format }} · 抽取 {{ ingestResult.extractedChars }} 字 ·
+            解析 {{ ingestResult.parsedBlocks }} 段 · 切块 {{ ingestResult.chunkCount }} 块 ·
+            知识库同步 {{ knowledgeSyncLabel(ingestResult.knowledgeSync) }}
+          </span>
+        </div>
+        <el-alert
+          v-if="ingestResult.warnings && ingestResult.warnings.length"
+          type="warning"
+          :closable="false"
+          class="ingest-warning"
+          :title="ingestResult.warnings.join('；')"
+        />
+        <div v-if="ingestResult.knowledgeSync === 'SKIPPED_NOT_CONFIGURED'" class="ingest-hint">
+          未配置知识库写入账号，本次只建立了本地索引：员工仍能搜到，但拿不到混合召回与重排。
+        </div>
+        <div v-else-if="ingestResult.knowledgeSync === 'FAILED'" class="ingest-hint">
+          知识库同步失败：该资料当前只能通过本地检索搜到。可稍后重试，或让管理员执行知识库重建。
+        </div>
+      </el-card>
+
+      <template #footer>
+        <el-button @click="ingestDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="ingesting" @click="handleSubmitIngest">上传并建立索引</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -257,6 +327,8 @@ import {
   deleteChapter,
   deleteMaterial,
   getCourseById,
+  getIngestCapabilities,
+  ingestMaterial,
   updateChapter,
   updateCourse,
   updateMaterial,
@@ -290,6 +362,17 @@ const pendingFile = ref(null)
 const pendingCoverFile = ref(null)
 const uploadedFileName = ref('')
 const uploadedCoverName = ref('')
+
+// 「上传并建索引」的状态
+const ingestDialogVisible = ref(false)
+const ingesting = ref(false)
+const ingestChapterId = ref(null)
+const ingestChapterTitle = ref('')
+const ingestFile = ref(null)
+const ingestFileList = ref([])
+const ingestResult = ref(null)
+const ingestCapabilities = ref({ formats: [], maxFileBytes: 0 })
+const ingestForm = reactive({ title: '', materialType: '' })
 
 const courseForm = reactive({
   courseName: '',
@@ -472,6 +555,72 @@ function openMaterialDialog(chapter, material = null) {
 function handleFileChange(uploadFile) {
   pendingFile.value = uploadFile.raw
   uploadedFileName.value = uploadFile.name
+}
+
+// ------------------------------------------------------------------ 上传并建索引
+
+function openIngestDialog(chapter) {
+  ingestChapterId.value = chapter.id
+  ingestChapterTitle.value = chapter.title || ''
+  ingestFile.value = null
+  ingestFileList.value = []
+  ingestResult.value = null
+  ingestForm.title = ''
+  ingestForm.materialType = ''
+  ingestDialogVisible.value = true
+  loadIngestCapabilities()
+}
+
+async function loadIngestCapabilities() {
+  // 只为提示文案；失败不影响上传，所以静默处理
+  if (ingestCapabilities.value.formats?.length) return
+  try {
+    const data = await getIngestCapabilities()
+    if (data) ingestCapabilities.value = data
+  } catch (e) { /* ignore */ }
+}
+
+function handleIngestFileChange(uploadFile) {
+  ingestFile.value = uploadFile.raw
+  ingestFileList.value = uploadFile.raw ? [uploadFile] : []
+}
+
+function knowledgeSyncLabel(status) {
+  if (status === 'SYNCED') return '已同步'
+  if (status === 'SKIPPED_NOT_CONFIGURED') return '未配置，已跳过'
+  if (status === 'FAILED') return '失败'
+  if (status === 'DELETED_EMPTY') return '正文为空，已清理'
+  return '未知'
+}
+
+async function handleSubmitIngest() {
+  if (!ingestFile.value) {
+    ElMessage.warning('请先选择要上传的文件')
+    return
+  }
+  const chapterId = ingestChapterId.value
+  const formData = new FormData()
+  formData.append('file', ingestFile.value)
+  if (ingestForm.title) formData.append('title', ingestForm.title)
+  if (ingestForm.materialType) formData.append('materialType', ingestForm.materialType)
+
+  ingesting.value = true
+  try {
+    const result = await ingestMaterial(chapterId, formData)
+    ingestResult.value = result
+    if (result.searchable) {
+      ElMessage.success(`已建立索引：抽取 ${result.extractedChars} 字、切块 ${result.chunkCount} 块`)
+    } else {
+      ElMessage.warning('资料已创建，但未产生索引，员工暂时搜不到')
+    }
+  } catch (e) {
+    // 后端对"抽不到正文"等情况会带明确原因返回，request.js 已统一弹出 message
+    ingestResult.value = null
+  } finally {
+    ingesting.value = false
+  }
+  // 刷新章节列表放在结果处理之外：刷新失败不该把刚拿到的结果清掉
+  loadCourseDetail().catch(() => {})
 }
 
 function handleCoverChange(uploadFile) {
@@ -739,5 +888,42 @@ onMounted(async () => {
     width: 100%;
     height: 180px;
   }
+}
+
+.ingest-tip {
+  margin-bottom: 16px;
+}
+
+.ingest-form {
+  margin-top: 4px;
+}
+
+.ingest-result {
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.ingest-result-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ingest-result-text {
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.ingest-warning {
+  margin-top: 10px;
+}
+
+.ingest-hint {
+  margin-top: 10px;
+  color: #b45309;
+  font-size: 13px;
+  line-height: 1.7;
 }
 </style>

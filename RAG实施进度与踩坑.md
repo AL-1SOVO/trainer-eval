@@ -597,3 +597,78 @@ Spring 的 `TransactionSynchronization.afterCommit` Javadoc 写得很明确：
 3. **MimirQ 的 `course-{courseId}` dataset 需要 30s 响应缓存过期才会看到最新结果**，
    自动化测试里查完就断言会误判（见坑39）。
 
+---
+
+## 八、补上解析层：上传即入知识库 — 2026-09-18
+
+### 8.1 为什么这一层必须补
+
+第七节之前，`uploadMaterial()` 只做三件事：存盘、返回 `fileUrl`、返回文件名。
+**不抽取正文、不建资料、不进索引**。于是内训师传一份 PDF/Word 后，
+如果不手动把正文粘贴进「资料内容」框，这条资料就是"有文件、没正文"——
+而切块、全文索引、向量化**全部以正文为输入**。
+
+结果：`tra_material` 里 DOCUMENT/VIDEO 类资料 `content` 为空 → 从未产生 `rag_chunk` → **永远搜不到**。
+这正是方案文档从 M1 就记着、但一直没解决的"解析层缺失"。
+
+### 8.2 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `training/service/DocumentTextExtractor.java`（新增） | 按扩展名分派抽取器：txt/md/csv/json/xml/html（自动探测 UTF-8/GBK）、docx（段落+表格）、pptx（逐页+表格）、xlsx（逐 sheet）、pdf（文本层） |
+| `training/service/MaterialIngestService.java`（新增） | 串起"抽正文 → 建资料 → 切块 → 灌库"，并**回查真实状态**回显 |
+| `TraCourseContentController` | `POST /training/chapters/{id}/materials/ingest`（multipart）、`GET /training/materials/ingest/capabilities` |
+| `RagIndexSyncService` | 新增按 materialId 记录的"最近一次灌库结果"（有界），供上传接口回查 |
+| `CourseEditor.vue` | 章节上新增「上传并建索引」按钮 + 结果回显卡片 |
+| `api/course.js` | `ingestMaterial()` / `getIngestCapabilities()` |
+
+### 8.3 实测证据
+
+```
+上传真 docx（MimirQ 自带样本）
+  → 抽取 450 字 / 解析 8 段 / 切块 2 块 / knowledgeSync=SYNCED
+  → MimirQ 直查：m9__信息安全制度样例2.txt  score=0.68
+员工搜索该文档独有短语「pdfplumber 文本清洗与分词」
+  → total=2，命中 [M9#0] mat=9，degraded=false
+  → trace.strategy = MIMIRQ+LOCAL_HYBRID
+删除资料 → 本地 rag_chunk 0 行、MimirQ 文档数回到基线 2 条
+
+Docker 停机时上传（降级路径）
+  → 本地索引成功、searchable=true、knowledgeSync=FAILED 如实回显
+  → 员工靠 LOCAL_HYBRID 仍能搜到（MimirQ 恢复后重新推送即补齐）
+```
+
+### 8.4 本轮新踩的坑（编号接上一节）
+
+- **坑41：默认配置里的占位 key 会伪装成"真实但无效的 key"。**
+  `application.yml` 写的是 `DEEPSEEK_API_KEY:${...:not-configured}`。
+  进程里没注入环境变量时，Spring 会拿 `not-configured` 去请求，
+  DeepSeek 返回 `401 - Your api key: ****ured is invalid` ——
+  **掩码后 4 位 `ured` 恰好是 `not-configured` 的结尾**，看起来像个被截断的真 key。
+  我因此绕了一圈才定位。排查 AI 报错时，**先确认"到底送出去了什么 key"**，
+  而不是先怀疑代码或模型。
+  （附带：harness 的 pwsh 进程没有继承 Windows 用户级环境变量，
+  `$env:DEEPSEEK_API_KEY` 为空但注册表里有值 —— 这本身就是个易踩的环境差异。）
+- **坑42：`@Transactional` 方法只能通过代理调用，自调用等于没有事务。**
+  `MaterialIngestService` 之所以要单独一个类，就是因为它需要调用
+  `TraCourseContentService.createMaterial()`（带 `@Transactional`）。
+  若把 ingest 逻辑写进同一个类里自调用，事务与"提交后建索引"的回调都会静默失效 ——
+  而且是**静默**：资料能建、日志正常，只是索引不写、MimirQ 不同步。
+  判断方法：看该方法是不是被"另一个 bean"调用的。
+- **坑43：前端 `try` 块里放"刷新列表"，会把已经拿到的结果一起吞掉。**
+  我最初的写法是 `try { const r = await ingest(...); result.value = r; await loadChunks() } catch { result.value = null }`，
+  而 `loadChunks` 这个函数**根本不存在**（正确的是 `loadCourseDetail`）→ 抛 `ReferenceError` →
+  被 catch 吞掉 → 刚拿到的上传结果被清空，界面看起来"上传没反应"。
+  教训：**刷新/清理这类后续动作不该和"主结果"共用同一个 try**，
+  参考实现已改为把刷新放到 try 之外并单独 catch。
+- **坑44：默认模型名不在服务方的模型列表里。**
+  `application.yml` 默认 `deepseek-v4-flash`，而 `GET /models` 实际只返回
+  `deepseek-flash` 与 `deepseek-v4-pro`。当前请求 `deepseek-v4-flash` 会被**宽容路由**到
+  `deepseek-flash`（实测 `tool_calls` 正常），属于"碰巧能用"。
+  这类"没报错但不在契约内"的配置，应该在发现时立刻改正，而不是等哪天对方收紧校验。
+- **坑45：文档里的复选框过期，会直接造成错误判断。**
+  本次用户判断"Agent 不会调用工具"，根源之一就是 `AI-AGENT-升级计划.md` 里
+  P0/P1/P4/P6 的相关项**全是 `[ ]`，而代码早已实现**。
+  已逐条对照代码重写该文档（每条注明证据位置），并补上"仍未完成"清单。
+  **规则：改代码的同一个提交里改文档。**
+

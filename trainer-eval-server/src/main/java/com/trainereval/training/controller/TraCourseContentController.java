@@ -7,9 +7,11 @@ import com.trainereval.training.dto.TraMaterialForm;
 import com.trainereval.training.entity.TraChapter;
 import com.trainereval.training.entity.TraCourse;
 import com.trainereval.training.entity.TraMaterial;
+import com.trainereval.training.service.MaterialIngestService;
 import com.trainereval.training.service.TraCourseContentService;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -22,6 +24,9 @@ public class TraCourseContentController {
 
     @Autowired
     private TraCourseContentService courseContentService;
+
+    @Autowired
+    private MaterialIngestService materialIngestService;
 
     @GetMapping("/courses/{courseId}/learn")
     public R<TraCourse> getLearningDetail(@PathVariable Long courseId) {
@@ -70,6 +75,28 @@ public class TraCourseContentController {
     @PreAuthorize("hasRole('TRAINER')")
     public R<Map<String, Object>> uploadMaterial(@RequestParam("file") MultipartFile file) {
         return R.ok(courseContentService.uploadMaterial(file));
+    }
+
+    /**
+     * 上传文件并直接建成<b>可被检索</b>的资料：抽取正文 → 建资料 → 切块 → 灌知识库。
+     * <p>
+     * 与 {@code /materials/upload} 的区别：那个只把文件存下来返回 URL，
+     * 之后还要人工建资料并粘贴正文；漏了那一步资料就没有正文，永远搜不到。
+     */
+    @PostMapping(value = "/chapters/{chapterId}/materials/ingest", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PreAuthorize("hasRole('TRAINER')")
+    public R<Map<String, Object>> uploadAndIndex(@PathVariable Long chapterId,
+                                                 @RequestParam("file") MultipartFile file,
+                                                 @RequestParam(value = "title", required = false) String title,
+                                                 @RequestParam(value = "materialType", required = false) String materialType) {
+        return R.ok(materialIngestService.uploadAndIndex(chapterId, file, title, materialType));
+    }
+
+    /** 前端用于提示"支持哪些格式、多大"，避免让用户先传一次才发现不支持。 */
+    @GetMapping("/materials/ingest/capabilities")
+    @PreAuthorize("hasRole('TRAINER')")
+    public R<Map<String, Object>> ingestCapabilities() {
+        return R.ok(materialIngestService.uploadCapabilities());
     }
 
     @PostMapping("/courses/cover/upload")

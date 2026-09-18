@@ -21,6 +21,19 @@ export function uploadMaterial(formData) {
     headers: { 'Content-Type': 'multipart/form-data' }
   })
 }
+/**
+ * 上传文件并直接建成"可被检索"的资料：后端抽取正文 → 建资料 → 切块 → 灌知识库。
+ * 与 uploadMaterial 的区别：那个只存盘返回 URL，之后还要人工粘贴正文，漏了那步就永远搜不到。
+ */
+export function ingestMaterial(chapterId, formData) {
+  return request.post(`/training/chapters/${chapterId}/materials/ingest`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+}
+/** 可上传的格式与大小上限（用于前端提示，避免先传一次才知道不支持） */
+export function getIngestCapabilities() {
+  return request.get('/training/materials/ingest/capabilities')
+}
 export function uploadCourseCover(formData) {
   return request.post('/training/courses/cover/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }

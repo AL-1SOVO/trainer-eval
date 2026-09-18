@@ -10,6 +10,8 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 资料改动后同步"两套索引"：
@@ -43,6 +45,37 @@ public class RagIndexSyncService {
     private final RagChunkMapper ragChunkMapper;
     private final MimirQIngestClient ingestClient;
 
+    public static final String PUSH_OK = "OK";
+    public static final String PUSH_SKIPPED = "SKIPPED_NOT_CONFIGURED";
+    public static final String PUSH_DELETED = "DELETED_EMPTY_CONTENT";
+
+    /**
+     * 最近一次"推送到 MimirQ"的结果，按 materialId 记录。
+     * <p>
+     * 为什么需要它：推送发生在<b>事务提交后的回调</b>里，调用方（上传接口）拿不到它的返回值。
+     * 而"到底有没有同步进知识库"正是用户提交资料后最想知道的一件事 ——
+     * 若这里回显"已同步"而实际失败了，等于骗人。所以把结果留在这里供调用方回查。
+     * 有界：超过 {@value #MAX_STATUS_ENTRIES} 条就整体清空（这是可重建的派生状态，丢了不影响正确性）。
+     */
+    private static final int MAX_STATUS_ENTRIES = 500;
+
+    private final Map<Long, String> lastPushStatus = new ConcurrentHashMap<>();
+
+    /** 查询某条资料最近一次灌库结果：OK / SKIPPED_NOT_CONFIGURED / DELETED_EMPTY_CONTENT / FAILED: ... */
+    public String lastPushStatus(Long materialId) {
+        return materialId == null ? null : lastPushStatus.get(materialId);
+    }
+
+    private void recordPushStatus(Long materialId, String status) {
+        if (materialId == null) {
+            return;
+        }
+        if (lastPushStatus.size() >= MAX_STATUS_ENTRIES) {
+            lastPushStatus.clear();
+        }
+        lastPushStatus.put(materialId, status);
+    }
+
     /** 独立事务内重建本地切块。返回写入的块数。 */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int rebuildLocalChunks(TraMaterial material) {
@@ -61,15 +94,24 @@ public class RagIndexSyncService {
      */
     public void pushToMimirQ(Long materialId, Long courseId, String title) {
         if (!ingestClient.isConfigured()) {
+            recordPushStatus(materialId, PUSH_SKIPPED);
             return;
         }
-        List<String> chunks = ragChunkMapper.listContentsByMaterial(materialId);
-        if (chunks.isEmpty()) {
-            // 正文被清空/本来就没有正文：把知识库里的旧文档也删掉，否则会搜到已删内容
-            ingestClient.deleteMaterial(materialId, courseId);
-            return;
+        try {
+            List<String> chunks = ragChunkMapper.listContentsByMaterial(materialId);
+            if (chunks.isEmpty()) {
+                // 正文被清空/本来就没有正文：把知识库里的旧文档也删掉，否则会搜到已删内容
+                ingestClient.deleteMaterial(materialId, courseId);
+                recordPushStatus(materialId, PUSH_DELETED);
+                return;
+            }
+            ingestClient.upsertMaterial(materialId, courseId, title, chunks);
+            recordPushStatus(materialId, PUSH_OK);
+        } catch (RuntimeException e) {
+            // 记录失败原因后继续往上抛：调用链上层的 try/catch 负责只记警告、不影响业务
+            recordPushStatus(materialId, "FAILED: " + e.getMessage());
+            throw e;
         }
-        ingestClient.upsertMaterial(materialId, courseId, title, chunks);
     }
 
     /** 资料被删除时同步删除 MimirQ 侧文档。 */
@@ -78,5 +120,6 @@ public class RagIndexSyncService {
             return;
         }
         ingestClient.deleteMaterial(materialId, courseId);
+        lastPushStatus.remove(materialId);
     }
 }
