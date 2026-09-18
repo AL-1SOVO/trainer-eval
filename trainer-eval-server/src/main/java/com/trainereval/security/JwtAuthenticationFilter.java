@@ -54,6 +54,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             return;
         }
 
+        // 会话代次校验：登出 / 改密会自增 token:gen:{userId}，
+        // 从而**一次性作废此前签发的所有 access token**（不止当前这一个 jti）。
+        // 缺了这一步时，改完密码旧的 access token 仍能继续用到自然过期 —— 实测踩到过。
+        Object genObj = redisUtils.get("token:gen:" + userId);
+        long currentGen = genObj == null ? 0L : Long.parseLong(genObj.toString());
+        if (jwtUtils.getSessionGenerationFromToken(token) != currentGen) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
         // Reconstruct LoginUser by loading from DB using stored userId
         LoginUser loginUser = null;
         try {

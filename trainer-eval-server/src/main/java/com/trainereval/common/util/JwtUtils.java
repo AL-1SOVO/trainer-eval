@@ -29,18 +29,36 @@ public class JwtUtils {
     public static final String TYPE_ACCESS = "access";
     public static final String TYPE_REFRESH = "refresh";
 
-    public String generateAccessToken(Long userId, String username) {
+    /**
+     * 签发 access token。
+     *
+     * <h3>为什么要带 sessionGeneration</h3>
+     * 原来 access token 不带代次，过滤器也只校验签名 + Redis 里 jti 是否存在，
+     * 导致：<b>改密/登出之后，此前签发的 access token 仍能继续用到自然过期</b>。
+     * 实测踩到过 —— 改完密码，旧 token 请求 /auth/userinfo 依然返回 200。
+     * refresh token 那边早就用"代次自增"解决了，access token 漏了同一道防线。
+     * <p>
+     * 用代次而不是比较签发时间：JWT 的 {@code iat} 只有秒级精度，
+     * 同一秒内"登录 + 改密"会让时间比较失效（这个坑之前踩过，见 AuthController 的注释）。
+     */
+    public String generateAccessToken(Long userId, String username, long sessionGeneration) {
         Date now = new Date();
         Date exp = new Date(now.getTime() + accessTokenTtl * 1000);
         return Jwts.builder()
                 .subject(String.valueOf(userId))
                 .claim("username", username)
                 .claim("typ", TYPE_ACCESS)
+                .claim("gen", sessionGeneration)
                 .id(UUID.randomUUID().toString())
                 .issuedAt(now)
                 .expiration(exp)
                 .signWith(getKey())
                 .compact();
+    }
+
+    /** 兼容旧调用：代次取 0。新代码请显式传入当前代次。 */
+    public String generateAccessToken(Long userId, String username) {
+        return generateAccessToken(userId, username, 0L);
     }
 
     public String generateRefreshToken(Long userId, long sessionGeneration) {

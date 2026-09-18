@@ -9,9 +9,11 @@ import com.trainereval.security.LoginUser;
 import com.trainereval.system.dto.LoginRequest;
 import com.trainereval.system.dto.LoginResponse;
 import com.trainereval.system.dto.UserForm;
+import com.trainereval.system.entity.SysDept;
 import com.trainereval.system.entity.SysRole;
 import com.trainereval.system.entity.SysUser;
 import com.trainereval.system.entity.SysUserRole;
+import com.trainereval.system.mapper.SysDeptMapper;
 import com.trainereval.system.mapper.SysMenuMapper;
 import com.trainereval.system.mapper.SysRoleMapper;
 import com.trainereval.system.mapper.SysUserMapper;
@@ -51,6 +53,8 @@ public class AuthController {
     private SysRoleMapper roleMapper;
     @Autowired
     private SysMenuMapper menuMapper;
+    @Autowired
+    private SysDeptMapper deptMapper;
     @Autowired
     private PasswordEncoder passwordEncoder;
 
@@ -157,16 +161,107 @@ public class AuthController {
         if (loginUser == null) {
             return R.error(401, "未登录");
         }
+        return R.ok(buildUserInfo(loginUser.getUser(), loginUser.getRoles(), loginUser.getPermissions()));
+    }
 
-        LoginResponse.UserInfo userInfo = LoginResponse.UserInfo.builder()
-                .userId(loginUser.getUser().getId())
-                .username(loginUser.getUser().getUsername())
-                .realName(loginUser.getUser().getRealName())
-                .avatar(loginUser.getUser().getAvatar())
-                .roles(loginUser.getRoles())
-                .permissions(loginUser.getPermissions())
+    /**
+     * 更新「个人信息」中允许本人修改的字段。
+     *
+     * <h3>为什么只允许改这几个</h3>
+     * 只放行 email / phone / avatar / gender —— 这些是个人联系方式的补充信息。
+     * <b>用户名、姓名、部门、状态、角色一律不允许自助修改</b>：
+     * 它们是组织与权限数据（姓名影响报表与阅卷署名、部门影响权限裁剪与统计口径、
+     * 角色直接决定能看什么）。允许本人改这些等于自助提权。
+     * 这也解释为什么这里不用 {@code UserForm} 直接 save —— 那个表单包含 deptId/roleIds/status。
+     */
+    @PutMapping("/profile")
+    public R<?> updateProfile(@RequestBody Map<String, Object> body) {
+        Long userId = SecurityUtils.getCurrentUserId();
+        if (userId == null) {
+            return R.error(401, "未登录");
+        }
+        SysUser user = userMapper.selectById(userId);
+        if (user == null) {
+            return R.error(404, "用户不存在");
+        }
+
+        SysUser update = new SysUser();
+        update.setId(userId);
+
+        if (body.containsKey("email")) {
+            String email = trimToNull(body.get("email"));
+            // 邮箱是可选的（允许清空），但填了就要像个邮箱：前端校验可以被绕过，
+            // 后端兜一层，避免脏数据进入后续的通知/找回密码链路。
+            if (email != null && !email.matches("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")) {
+                return R.error(400, "邮箱格式不正确");
+            }
+            update.setEmail(email);
+        }
+        if (body.containsKey("phone")) {
+            String phone = trimToNull(body.get("phone"));
+            if (phone != null && !phone.matches("^1[3-9]\\d{9}$")) {
+                return R.error(400, "手机号格式不正确（应为 11 位中国大陆手机号）");
+            }
+            update.setPhone(phone);
+        }
+        if (body.containsKey("avatar")) {
+            update.setAvatar(trimToNull(body.get("avatar")));
+        }
+        if (body.containsKey("gender")) {
+            Object g = body.get("gender");
+            if (g == null || "".equals(g)) {
+                update.setGender(null);
+            } else {
+                try {
+                    int value = Integer.parseInt(String.valueOf(g));
+                    if (value != 0 && value != 1 && value != 2) {
+                        return R.error(400, "性别取值不合法");
+                    }
+                    update.setGender(value);
+                } catch (NumberFormatException e) {
+                    return R.error(400, "性别取值不合法");
+                }
+            }
+        }
+
+        userMapper.updateById(update);
+
+        SysUser fresh = userMapper.selectById(userId);
+        LoginUser loginUser = SecurityUtils.getCurrentUser();
+        return R.ok("个人信息已更新", buildUserInfo(fresh,
+                loginUser == null ? List.of() : loginUser.getRoles(),
+                loginUser == null ? List.of() : loginUser.getPermissions()));
+    }
+
+    private String trimToNull(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String s = String.valueOf(value).trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    /** 统一装配用户信息，避免 /userinfo、/login、/profile 三处各写一份而字段不一致。 */
+    private LoginResponse.UserInfo buildUserInfo(SysUser user, List<String> roles, List<String> permissions) {
+        String deptName = null;
+        if (user.getDeptId() != null) {
+            SysDept dept = deptMapper.selectById(user.getDeptId());
+            deptName = dept == null ? null : dept.getDeptName();
+        }
+        return LoginResponse.UserInfo.builder()
+                .userId(user.getId())
+                .username(user.getUsername())
+                .realName(user.getRealName())
+                .avatar(user.getAvatar())
+                .roles(roles)
+                .permissions(permissions)
+                .email(user.getEmail())
+                .phone(user.getPhone())
+                .gender(user.getGender())
+                .deptId(user.getDeptId())
+                .deptName(deptName)
+                .lastLoginTime(user.getLastLoginTime() == null ? null : user.getLastLoginTime().toString())
                 .build();
-        return R.ok(userInfo);
     }
 
     /**
@@ -214,11 +309,14 @@ public class AuthController {
     }
 
     private LoginResponse buildLoginResponse(SysUser user, List<String> roles, List<String> permissions) {
-        String accessToken = jwtUtils.generateAccessToken(user.getId(), user.getUsername());
-
-        // 把当前会话代次写进 refresh token；登出/改密时代次自增即可让旧 token 全部失效
+        // 代次必须在签发**两个** token 之前取好：过滤器会拿 access token 里的 gen
+        // 与 token:gen:{userId} 比对，两边带同一个当前代次才能一并作废。
+        // 原来只有 refresh token 带 gen，而 access token 不带 —— 于是改密后
+        // 旧的 access token 仍能继续用到自然过期（实测踩到过）。
         Object genObj = redisUtils.get("token:gen:" + user.getId());
         long currentGen = genObj != null ? Long.parseLong(genObj.toString()) : 0L;
+
+        String accessToken = jwtUtils.generateAccessToken(user.getId(), user.getUsername(), currentGen);
         String refreshToken = jwtUtils.generateRefreshToken(user.getId(), currentGen);
 
         redisUtils.set("token:access:" + jwtUtils.getJtiFromToken(accessToken), user.getId().toString(),
@@ -226,14 +324,7 @@ public class AuthController {
         redisUtils.set("token:refresh:" + jwtUtils.getJtiFromToken(refreshToken), user.getId().toString(),
                 refreshTokenTtl, TimeUnit.SECONDS);
 
-        LoginResponse.UserInfo userInfo = LoginResponse.UserInfo.builder()
-                .userId(user.getId())
-                .username(user.getUsername())
-                .realName(user.getRealName())
-                .avatar(user.getAvatar())
-                .roles(roles)
-                .permissions(permissions)
-                .build();
+        LoginResponse.UserInfo userInfo = buildUserInfo(user, roles, permissions);
 
         return LoginResponse.builder()
                 .token(accessToken)
