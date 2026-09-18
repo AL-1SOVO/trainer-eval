@@ -1,14 +1,11 @@
 package com.trainereval.report.service;
 
-import java.util.Map;
+import com.trainereval.report.dto.ReportDataset;
 
+/**
+ * PDF 报表渲染器。与 {@link ExcelReportBuilder} 一样收敛为单个 {@code build(dataset)}。
+ */
 public interface PdfReportBuilder {
 
-    byte[] buildUserTrainingReport(Map<String, Object> params);
-
-    byte[] buildUserExamReport(Map<String, Object> params);
-
-    byte[] buildDeptTrainingReport(Map<String, Object> params);
-
-    byte[] buildCourseStatsReport(Map<String, Object> params);
+    byte[] build(ReportDataset dataset);
 }
