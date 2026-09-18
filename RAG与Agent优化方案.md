@@ -149,6 +149,52 @@ DeepSeek **没有** embedding API，不能复用现有的 DEEPSEEK_API_KEY。
 
 ---
 
+#### 操作手册（key 到位后按此执行，已把"重建"做成接口）
+
+> 为什么必须有独立的"重建"步骤：MimirQ 的硬要求是**换 embedding 模型后已有向量全部失效**，
+> 而它没有单独的"重建"按钮 —— 做法就是**重新灌入文档**（先删后建会触发重新向量化）。
+> 日常上传/修改会自动同步，但**换模型这一天，存量资料不会自己重来一遍**。
+
+```powershell
+# ① 改 embedding 配置（mimirq/.env）
+EMBEDDING_PROVIDER=openai_compatible
+EMBEDDING_MODEL=BAAI/bge-m3
+EMBEDDING_API_BASE=https://api.siliconflow.cn/v1
+EMBEDDING_API_KEY=<你的 key>
+EMBEDDING_DIM=<与模型匹配的维度，bge-m3 为 1024>
+
+# ② 重启 MimirQ（让新配置生效）
+.\stop.cmd -KeepMimirQ:$false        # 或 docker compose -f .\mimirq\docker\docker-compose.lite.yml restart
+docker compose -f .\mimirq\docker\docker-compose.lite.yml up -d
+
+# ③ 全量重推，触发重新向量化
+#    POST /api/v1/rag/knowledge-base/resync   （MANAGER 权限）
+#    会逐条把有正文的资料重新灌入 MimirQ；先删后建，不产生重复文档
+
+# ④ 巡检确认服务端事实与本地期望一致
+#    GET  /api/v1/rag/knowledge-base/status
+
+# ⑤ 重跑 Golden 评测，对比两轮指标
+#    POST /api/v1/rag/eval   （结果留档在 rag_eval_run.strategy）
+```
+
+**已交付的配套接口**（本次实现，不依赖 key 即可用）：
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/v1/rag/knowledge-base/resync` | 全量重推：把有正文的资料重新灌入 MimirQ；返回 pushed/skipped/failed 与失败明细 |
+| `GET /api/v1/rag/knowledge-base/status` | 巡检：MimirQ 侧实际有哪些库、各多少文档，与本地期望对比即可发现漏灌的课程 |
+
+实测（2026-09-18，用当前 `deterministic_test` 配置走通全流程）：
+`status` 显示 MimirQ `course-1` 有 2 文档、本地期望 2 条资料，一致；
+`resync` 返回 `pushed=2, skipped=0, failed=0`；重推后检索仍命中 `[M3#0]`/`[M4#1]`，`strategy=MIMIRQ`。
+
+> 重推过程中发现并修掉一个真实缺陷：清理旧文档时只删了带 `m{id}__` 前缀的，
+> 早期手工灌库的**裸标题文档**残留下来，导致同一份资料在知识库里存在两份
+> （实测重推后文档数从 2 变成 4）。已改为同时清理"文件名去扩展名 == 资料标题"的历史文档。
+
+---
+
 ### P1-1 灌库异步化
 
 **现状**：上传请求会同步等待 MimirQ（本地 449 ms 可接受）。接远程 MimirQ 或批量导入时，

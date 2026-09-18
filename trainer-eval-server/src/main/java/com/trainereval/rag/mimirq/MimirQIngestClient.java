@@ -101,8 +101,19 @@ public class MimirQIngestClient {
         String datasetId = resolveDatasetId(courseId);
         String fileName = MimirQDocumentNaming.fileName(materialId, title);
 
-        // 先删旧文档：同名（同 materialId 前缀）的都要清掉，避免"改了标题/残留多次上传"造成重复命中
-        for (String oldId : findDocumentIds(datasetId, MimirQDocumentNaming.idPrefix(materialId))) {
+        // 先删旧文档，再建新的。这里要删**两类**：
+        // ① 同名（m{materialId}__ 前缀）的：处理"改了标题""重复上传"造成的残留；
+        // ② 历史命名的（文件名去掉扩展名正好等于资料标题）：早期手工灌库用的是裸标题，
+        //    不带上这个，重推之后同一份资料会在知识库里存在两份（旧的一份 + 新的一份），
+        //    既浪费索引又让引用映射出现歧义 —— 这是实际重推时暴露出来的问题。
+        List<String> stale = new ArrayList<>(findDocumentIds(datasetId,
+                MimirQDocumentNaming.idPrefix(materialId)));
+        for (String legacy : findDocumentIdsByStem(datasetId, title)) {
+            if (!stale.contains(legacy)) {
+                stale.add(legacy);
+            }
+        }
+        for (String oldId : stale) {
             try {
                 deleteDocument(oldId);
                 log.info("MimirQ 旧文档已删除：materialId={}, documentId={}", materialId, oldId);
@@ -155,6 +166,29 @@ public class MimirQIngestClient {
 
     // ------------------------------------------------------------------ dataset / document
 
+    /**
+     * 列出 MimirQ 侧的全部知识库及其文档/切块规模，用于运维巡检。
+     * 返回的是<b>服务端事实</b>（不是本地期望值），与本地期望对比即可发现漏灌的课程。
+     */
+    public List<Map<String, Object>> listDatasets() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (!isConfigured()) {
+            return result;
+        }
+        JsonNode root = getJson(properties.getDatasetsPath() + "/?page=1&page_size=200");
+        for (JsonNode item : root.path("items")) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", item.path("name").asText(""));
+            row.put("datasetId", item.path("id").asText(""));
+            JsonNode summary = item.path("ingestion_summary");
+            row.put("documents", summary.path("total_documents").asInt(0));
+            row.put("chunks", summary.path("total_chunks").asInt(0));
+            row.put("status", item.path("operational_status").asText(""));
+            result.add(row);
+        }
+        return result;
+    }
+
     /** 按名字 {@code course-{courseId}} 找 dataset，找不到就建一个。 */
     private String resolveDatasetId(Long courseId) {
         if (courseId == null) {
@@ -192,12 +226,33 @@ public class MimirQIngestClient {
 
     /** 列出 dataset 下文件名以 prefix 开头的文档 id。 */
     private List<String> findDocumentIds(String datasetId, String prefix) {
+        return findDocumentIds(datasetId, filename -> filename.startsWith(prefix));
+    }
+
+    /**
+     * 找出"历史命名"的文档：文件名去掉扩展名后正好等于资料标题。
+     * <p>
+     * 只用于<b>清理迁移残留</b>。它依赖标题唯一，所以仅当同一课程下不会出现同名资料时才是安全的 ——
+     * 这也是为什么新文档一律带上 {@code m{id}__} 前缀：让新数据不依赖这个脆弱的假设。
+     */
+    private List<String> findDocumentIdsByStem(String datasetId, String title) {
+        if (title == null || title.isBlank()) {
+            return List.of();
+        }
+        String stem = title.trim();
+        return findDocumentIds(datasetId, filename -> {
+            String noExt = filename.trim().replaceAll("\\.[A-Za-z0-9]{1,6}$", "").trim();
+            return noExt.equals(stem);
+        });
+    }
+
+    private List<String> findDocumentIds(String datasetId, java.util.function.Predicate<String> matches) {
         JsonNode root = getJson(properties.getDocumentsPath()
                 + "/?dataset_id=" + datasetId + "&limit=200");
         List<String> ids = new ArrayList<>();
         for (JsonNode item : root.path("items")) {
             String filename = item.path("filename").asText("");
-            if (filename.startsWith(prefix)) {
+            if (!filename.isBlank() && matches.test(filename)) {
                 String id = item.path("id").asText("");
                 if (!id.isBlank()) {
                     ids.add(id);

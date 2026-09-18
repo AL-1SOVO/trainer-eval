@@ -13,6 +13,7 @@ import com.trainereval.rag.mapper.RagGoldenItemMapper;
 import com.trainereval.rag.mapper.RagRetrievalTraceMapper;
 import com.trainereval.rag.service.ChunkingService;
 import com.trainereval.rag.service.GoldenEvalService;
+import com.trainereval.rag.service.KnowledgeBaseSyncService;
 import com.trainereval.rag.service.RagRetrievalFacade;
 import com.trainereval.rag.service.RetrievalService;
 import com.trainereval.training.entity.TraMaterial;
@@ -46,6 +47,7 @@ public class RagAdminController {
     private final RagGoldenItemMapper goldenMapper;
     private final RagRetrievalTraceMapper traceMapper;
     private final TraMaterialMapper materialMapper;
+    private final KnowledgeBaseSyncService knowledgeBaseSyncService;
 
     /**
      * 检索链路健康状态：是否启用 MimirQ、熔断是否打开、最近一次失败原因。
@@ -74,6 +76,31 @@ public class RagAdminController {
         result.put("materialsIndexed", materials);
         result.put("chunkStats", chunkingService.chunkStats());
         return R.ok("重建完成", result);
+    }
+
+    /**
+     * 把全部有正文的资料重新推送到 MimirQ（知识库侧重建）。
+     * <p>
+     * 与 {@code /reindex} 的区别：那个只重建<b>本地切块</b>；本接口重建<b>知识库</b>。
+     * 换 embedding 模型后必须调用本接口 —— MimirQ 要求换模型后全量重建，而它没有单独的
+     * "重建"按钮，做法就是重新灌入（删除后重建会触发重新向量化）。
+     * 也用于补齐"MimirQ 不可用期间上传、只进了本地索引"的资料。
+     * <p>
+     * 代价：MimirQ 侧每份文档先删后建，会重新解析/切块/向量化，资料多时耗时明显。
+     */
+    @PostMapping("/knowledge-base/resync")
+    @PreAuthorize("hasRole('MANAGER')")
+    public R<Map<String, Object>> resyncKnowledgeBase() {
+        Map<String, Object> result = knowledgeBaseSyncService.resyncAll();
+        boolean configured = Boolean.TRUE.equals(result.get("configured"));
+        return R.ok(configured ? "知识库重建完成" : "未配置知识库写入账号，未执行", result);
+    }
+
+    /** 知识库巡检：MimirQ 侧实际有哪些库、各多少文档，与本地期望对比发现漏灌。 */
+    @GetMapping("/knowledge-base/status")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> knowledgeBaseStatus() {
+        return R.ok(knowledgeBaseSyncService.status());
     }
 
     /** 预览某个资料的切块效果（不落库），用于调切块参数。 */
