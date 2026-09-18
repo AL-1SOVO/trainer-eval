@@ -1,6 +1,6 @@
 <template>
   <el-container style="height:100vh">
-    <el-aside :width="appStore.sidebarCollapsed ? '64px' : '220px'" style="background:#304156;transition:width 0.3s;overflow:hidden">
+    <el-aside :width="appStore.sidebarCollapsed ? '64px' : '220px'" class="app-aside">
       <Sidebar />
     </el-aside>
     <el-container>
@@ -51,3 +51,18 @@ function handleCommand(cmd) {
   else if (cmd === 'profile') { /* TODO */ }
 }
 </script>
+
+<style scoped>
+/* 侧边栏容器：用 flex 列交给 Sidebar 内部去切"标题固定 + 菜单滚动"。
+   height 由外层 el-container(100vh) 拉伸决定，这里只需保证是一个确定高度的 flex 容器，
+   否则 Sidebar 里的 height:100% 会算不出高度，滚动条不会出现。
+   为什么不用原本的 overflow:auto：那会让整块侧边栏（含标题）一起滚，
+   而且 el-menu 在折叠态会弹层，外层出现滚动条会带动整列抖动。 */
+.app-aside {
+  background: #304156;
+  transition: width 0.3s;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+</style>
