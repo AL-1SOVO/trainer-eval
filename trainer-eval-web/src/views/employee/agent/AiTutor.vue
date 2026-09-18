@@ -26,6 +26,12 @@
               {{ msg.label }}
             </el-tag>
           </div>
+          <div v-else-if="msg.role === 'reflection'" class="tool-step">
+            <el-tag size="small" type="warning" effect="plain">
+              <el-icon><Refresh /></el-icon>
+              {{ msg.label }}
+            </el-tag>
+          </div>
           <div v-else-if="msg.role === 'user'" class="bubble-row user">
             <div class="bubble user-bubble">{{ msg.content }}</div>
           </div>
@@ -33,6 +39,26 @@
             <div class="bubble ai-bubble"><span class="pre-wrap">{{ msg.content }}</span></div>
           </div>
         </template>
+      </div>
+
+      <!-- 任务规划：多步任务时展示助手打算怎么做、做到哪一步（P0.2）。
+           简单问题不会规划，这里就整块不出现，避免为展示而展示。 -->
+      <div v-if="plan.length" class="plan-panel">
+        <div class="plan-head">
+          <el-icon><List /></el-icon>
+          <span>执行计划</span>
+          <span class="plan-progress">{{ planDoneCount }}/{{ plan.length }} 步完成</span>
+        </div>
+        <div v-for="step in plan" :key="step.index" class="plan-step" :class="'step-' + step.status.toLowerCase()">
+          <el-icon class="step-icon">
+            <CircleCheck v-if="step.status === 'DONE'" />
+            <Loading v-else-if="step.status === 'RUNNING'" />
+            <Warning v-else-if="step.status === 'FAILED'" />
+            <Minus v-else />
+          </el-icon>
+          <span class="step-title">{{ step.title }}</span>
+          <span v-if="step.tool" class="step-tool">{{ step.tool }}</span>
+        </div>
       </div>
 
       <div v-if="sources.length" class="sources">
@@ -76,7 +102,7 @@
 </template>
 
 <script setup>
-import { nextTick, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { streamAgentChat } from '@/api/agent'
@@ -90,6 +116,8 @@ const messages = ref([])
 const bodyRef = ref(null)
 // 本轮回答的引用来源（由后端 SSE 的 citation 事件推送）
 const sources = ref([])
+// 任务规划：多步任务时后端先下发步骤表，再逐步回报状态（P0.2）
+const plan = ref([])
 let sessionId = localStorage.getItem('agent_session')
 if (!sessionId) {
   sessionId = crypto.randomUUID()
@@ -106,6 +134,8 @@ function sessionIdForUser() {
   // 用户切换账号时换会话，避免历史串号
   return `${userStore.userInfo?.id || userStore.userInfo?.username || 'me'}:${sessionId}`
 }
+
+const planDoneCount = computed(() => plan.value.filter(s => s.status === 'DONE').length)
 
 function scrollBottom() {
   nextTick(() => {
@@ -125,11 +155,20 @@ function send(preset) {
   input.value = ''
   streaming.value = true
   sources.value = []
+  plan.value = []
   messages.value.push({ role: 'user', content: text })
   scrollBottom()
 
   const onEvent = (event, data) => {
-    if (event === 'tool_call') {
+    if (event === 'plan') {
+      // 计划下发 / 最终定稿都会走这个事件；finalized 表示本轮结束，用它替换整表
+      plan.value = data.steps || []
+      scrollBottom()
+    } else if (event === 'step_status') {
+      const step = plan.value.find(s => s.index === data.index)
+      if (step) step.status = data.status
+      scrollBottom()
+    } else if (event === 'tool_call') {
       messages.value.push({
         role: 'tool',
         running: true,
@@ -143,6 +182,15 @@ function send(preset) {
         step.running = false
         step.label = `${toolLabel(step.toolName)} 完成`
       }
+      scrollBottom()
+    } else if (event === 'reflection') {
+      // 反思：工具没拿到有用信息时的自纠。如实展示，让用户知道助手在重试而不是"没反应"
+      messages.value.push({
+        role: 'reflection',
+        label: data.retrying
+          ? `${toolLabel(data.tool)} 未命中（${data.reason}），正在换关键词重试…`
+          : `${toolLabel(data.tool)} 仍无结果（${data.reason}），将如实告知`
+      })
       scrollBottom()
     } else if (event === 'delta') {
       const last = messages.value[messages.value.length - 1]
@@ -260,6 +308,67 @@ function toolLabel(name) {
 .tool-step {
   margin: 10px 0;
   text-align: center;
+}
+
+/* 执行计划面板：让"助手打算怎么做 / 做到哪一步"可见 */
+.plan-panel {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.plan-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 8px;
+}
+
+.plan-progress {
+  margin-left: auto;
+  font-weight: 400;
+  color: #94a3b8;
+}
+
+.plan-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.plan-step .step-icon {
+  flex: none;
+}
+
+.plan-step .step-tool {
+  margin-left: auto;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.plan-step.step-done {
+  color: #16a34a;
+}
+
+.plan-step.step-running {
+  color: #2563eb;
+}
+
+.plan-step.step-failed {
+  color: #dc2626;
+}
+
+.plan-step.step-skipped {
+  color: #94a3b8;
+  text-decoration: line-through;
 }
 
 .bubble-row {

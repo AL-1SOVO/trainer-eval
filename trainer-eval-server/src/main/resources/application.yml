@@ -60,6 +60,13 @@ agent:
     max-iterations: 6
     history-window: 20
     history-ttl-hours: 168
+    # 任务规划（P0.2）：auto 走启发式门（短消息/闲聊不规划，避免为展示而规划）；
+    # always 每次强制规划；off 关闭。规划失败会自动退化成"走一步看一步"，不影响对话。
+    planning-mode: ${AGENT_PLANNING_MODE:auto}
+    max-plan-steps: 5
+    # 单工具反思重试上限（P0.3）。只对"参数可调"的检索工具生效：
+    # 成绩/错题类工具为空是"确实没数据"，重试只会白烧 token。
+    max-tool-retries: 2
 
 # 知识库服务（MimirQ）接入。对应《企业级RAG实施方案.md》阶段三 3.4。
 # 检索链路：MimirQ → 本地混合检索(ngram+子串+RRF) → 子串兜底；

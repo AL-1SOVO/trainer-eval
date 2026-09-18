@@ -46,15 +46,40 @@
       结果以 `ToolResponseMessage` 回填；终止条件是"本轮响应不含 tool_calls"
       或达到 `maxIterations`（超限时明确报错而不是静默截断）
 
-### 2. 任务规划与分解 Planning — ⬜ 未完成
+### 2. 任务规划与分解 Planning — ✅ 已完成（2026-09-18）
 
-- [ ] 复杂任务先拆解为步骤列表再逐步执行（如"生成个性化补训方案" → 分析弱项 → 检索资料 → 匹配练习题 → 输出计划）
-- [ ] 步骤执行状态持久化，支持中断后继续
+- [x] 复杂任务先拆解为步骤列表再逐步执行
+      （证据：`agent/service/AgentPlanner.java` 产出结构化步骤表；
+      `AgentChatService` 通过 SSE `plan` 事件下发，`step_status` 逐个回报状态；
+      前端渲染成带状态的执行计划面板）
+- [x] 步骤执行状态持久化，支持中断后继续
+      （证据：计划与状态写入 Redis `agent:plan:{userId}:{sessionId}`，TTL 同会话历史；
+      下一轮若存在未完成步骤，会作为上下文交给模型继续）
 
-### 3. 反思与自我修正 ReAct / Retry — ⬜ 未完成
+> 设计取舍：规划**不是每次都做**。`agent.tutor.planning-mode` 默认 `auto` 走启发式门
+> （短消息/闲聊不规划），因为对"我考了多少分"这类单步问题规划纯属为展示而增延迟。
+> 门只是粗筛，模型仍可返回空计划来否决。规划失败会自动退化为原来的"走一步看一步"，
+> 不影响对话本身。
 
-- [ ] 工具执行失败或输出解析失败时，Agent 自主决定重试策略而非直接兜底
-      （注：**批改链路**已修掉"AI 失败静默写 0 分"的问题 —— 那是数据正确性问题，与本条不同）
+### 3. 反思与自我修正 ReAct / Retry — ✅ 已完成（2026-09-18）
+
+- [x] 工具执行失败或输出解析失败时，Agent 自主决定重试策略而非直接兜底
+      （证据：`agent/service/AgentReflection.java` 诊断工具返回，
+      命中"空结果/报错"时以 SystemMessage 追加**具体**的重试指引
+      —— 换更宽泛的词 / 换同义表达 / 拆词，并把 `reflection` 事件推给前端；
+      单工具重试上限 `agent.tutor.max-tool-retries`=2，用尽后转为"如实告知"指引）
+
+> 关键设计：**区分"该重试"与"重试无意义"**。
+> 检索类工具（参数是关键词）空结果值得换词重试；
+> 成绩/错题类工具空结果是"确实没数据"，重试只会白烧 token，直接如实说明。
+>
+> 实测（问语料里不存在的 Kubernetes）：
+> ```
+> event:reflection x2  {"tool":"searchCourseMaterials","reason":"资料检索无结果","retrying":true,"attempt":1}
+>                      {"tool":"searchCourseMaterials","reason":"资料检索无结果","retrying":true,"attempt":2}
+> ```
+> 最终回答明确指出"仅命中一份无关资料 M4#0《常见网络安全威胁与防范指南》…未涉及 Helm 或容器编排，
+> 非你想要的知识点"，并说明该知识点尚未上传 —— 而不是拿网络安全资料硬答 Kubernetes。
 
 ---
 
@@ -190,7 +215,7 @@
 > + RAGAS/golden 回归评估，AI 批改与教师评分一致性达 X%，
 > 支持「出题-批改-诊断-补训规划」多 Agent 协作闭环，文档级 ACL 与企业权限体系打通。
 
-**当前缺口**：P0.2 规划、P0.3 反思重试、P2 多智能体、P3 MCP、P5.12 Langfuse、P1.4 embedding。
+**当前缺口**：P2 多智能体、P3 MCP、P5.12 Langfuse、P1.4 embedding。
 其中 **embedding 是质量短板**（其余是能力广度）。
 
 ---
