@@ -127,12 +127,19 @@ public class MimirQClient {
                 throw new MimirQUnavailableException("MimirQ 响应缺少 records 数组: " + abbreviate(raw));
             }
             List<MimirQRecord> result = new ArrayList<>();
+            int dropped = 0;
             for (JsonNode node : records) {
                 String content = node.path("content").asText("");
                 if (content.isBlank()) {
                     continue;
                 }
                 double score = node.path("score").asDouble(0.0);
+                // 丢弃"没有向量信号"的命中（score=0）：它们来自 MimirQ 的关键词通道，
+                // 不受其 score_threshold 约束。原因见 MimirQProperties.minScore 的说明。
+                if (score < properties.getMinScore()) {
+                    dropped++;
+                    continue;
+                }
                 String title = node.path("title").asText(null);
                 Map<String, Object> metadata = new LinkedHashMap<>();
                 JsonNode meta = node.path("metadata");
@@ -143,6 +150,10 @@ public class MimirQClient {
                     title = metadata.get("title") == null ? null : String.valueOf(metadata.get("title"));
                 }
                 result.add(new MimirQRecord(content, score, title, metadata));
+            }
+            if (dropped > 0) {
+                log.debug("MimirQ 返回 {} 条 score 低于 {} 的命中，已丢弃（无向量信号）",
+                        dropped, properties.getMinScore());
             }
             return result;
         } catch (MimirQUnavailableException e) {

@@ -79,7 +79,25 @@ mimirq:
   timeout: 5s
   connect-timeout: 1500ms
   top-k: 6
-  score-threshold: 0.4
+  # 传给 MimirQ 的分数阈值。实测它只作用于向量通道，关键词通道的命中不受约束，
+  # 所以还需要下面的 min-score 兜底。
+  #
+  # 当前语料（2 份文档 + 20 题 golden）的实测数据：
+  #   golden 题命中最高分：min 0.60 / 中位 0.74 / max 0.81
+  #   语料外问题最高分：    0.60 ~ 0.63
+  #   两者在 0.60~0.63 重叠 → 阈值无法"干净地"区分相关与不相关。
+  #
+  # 取 0.7 的依据（不是拍脑袋）：它既能滤掉语料外的噪声，又不损失召回 ——
+  # 被滤掉的 golden 命中由本地混合检索补回，实测 CHAIN 仍为
+  #   hitRate 1.0000 / recall 1.0000 / MRR 1.0000（阈值 0.4 时 MRR 只有 0.9500）。
+  # 代价与再调优触发条件：阈值偏高意味着部分查询依赖词面通道兜底。
+  #   **语料变大后必须用同样的方法重测**（golden 分数分布 vs 语料外分数分布），
+  #   再用 MIMIRQ_SCORE_THRESHOLD 覆盖，不要把这个值当成永久结论。
+  score-threshold: ${MIMIRQ_SCORE_THRESHOLD:0.7}
+  # 相关度下限：丢弃 score 低于它的命中。默认 0.01，等价于"只丢 score=0"——
+  # 那些是 MimirQ 关键词通道的产物（不受 score_threshold 约束），
+  # 会让语料外的问题也拿到"资料"并据此编造引用。词面匹配本地已经做了，丢弃不损失召回。
+  min-score: ${MIMIRQ_MIN_SCORE:0.01}
   # MimirQ 的扩展字段：fast 会关闭昂贵的回退/重排分支，适合 Agent 在线对话
   latency-profile: fast
   max-courses-per-query: 5

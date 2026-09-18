@@ -44,6 +44,21 @@ public class MimirQProperties {
     private double scoreThreshold = 0.4;
 
     /**
+     * 相关度下限：低于它的命中直接丢弃（默认 0.01，等价于"只丢 score=0"）。
+     * <p>
+     * 为什么在 Java 侧再设一道，而不是只靠 MimirQ 的 {@code scoreThreshold}：
+     * 实测（2026-09-18）发现 MimirQ 的 {@code score_threshold} <b>只作用于向量通道</b>，
+     * 关键词通道的命中不受它约束，而且这些命中会以 <b>score = 0.0</b> 返回。
+     * 把 score_threshold 调到 0.7，MimirQ 依然返回 score=0.0 的记录 ——
+     * 于是一个语料里根本没有的问题（如"Kubernetes 容器编排"）也会拿到两条"资料"，
+     * 助手再据此编造引用。
+     * <p>
+     * 代价说明：0 分的命中是纯词面匹配，而<b>本地混合检索已经在做同一件事</b>
+     * （ngram 全文 + 子串），且门面会把本地结果作为补充。所以丢弃它们不损失召回。
+     */
+    private double minScore = 0.01;
+
+    /**
      * MimirQ 的 latency_profile 扩展。取 "fast" 会关闭昂贵的回退/重排分支，
      * 适合 Agent 在线对话；设为空则走质量优先路径。
      */

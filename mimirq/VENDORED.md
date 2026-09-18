@@ -65,7 +65,24 @@ Copy-Item .\mimirq\.env.example .\mimirq\.env
 | `DIFY_EXTERNAL_KNOWLEDGE_ENABLED=true` | 打开 Dify 兼容检索接口 |
 | `DIFY_EXTERNAL_KNOWLEDGE_API_KEYS` | 检索用 API Key，对应 trainer-eval 的 `MIMIRQ_API_KEY` |
 | `DIFY_EXTERNAL_KNOWLEDGE_MAP_JSON` | `knowledge_id → dataset UUID` 映射，如 `{"course-1":{"dataset_ids":["<uuid>"]}}` |
-| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | 向量模型。默认 `deterministic_test` 是**哈希向量，排序无语义** |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | 向量模型。默认 `deterministic_test` 是**哈希向量、排序无语义，必须换掉** |
+| `HF_ENDPOINT` / `HF_HOME` | 模型下载源与缓存位置（见下面的向量模型一节） |
+
+> 📌 **集成相关配置的完整模板见 [`INTEGRATION.env.example`](./INTEGRATION.env.example)**：
+> 含向量模型选型、模型缓存持久化、Dify 检索配置，以及**换模型后的必做步骤**。
+> 这些值若只存在于某一台机器上，换台机器就会出现"检索质量突然变差"这类无法解释的现象。
+
+## 向量模型（直接影响检索质量）
+
+当前使用**本地 sentence-transformers**：`EMBEDDING_PROVIDER=local` +
+`EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5`（约 95MB / 512 维 / 中文优化）。
+好处是**不需要任何外部 key**，且模型缓存在 `upload_data` 卷里（`HF_HOME=/data/uploads/hf_cache`），
+容器重建不会丢。
+
+⚠️ **换 embedding 模型后必须清空向量库并全量重推**：Chroma 集合的维度是固定的，
+旧维度的向量会让新维度的向量**插不进去**（错误信息不直观，容易误判成"灌库失败"）。
+Java 侧为此提供了 `POST /api/v1/rag/knowledge-base/resync`（全量重推）与
+`GET /api/v1/rag/knowledge-base/status`（巡检）；完整步骤见 `INTEGRATION.env.example` 末尾。
 
 ## 与 trainer-eval 的接口约定
 

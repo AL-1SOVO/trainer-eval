@@ -122,3 +122,6 @@ work/
 /docs/superpowers/
 /docs/waves/
 /web/docs/
+# 本地手工备份的 .env：含 SECRET_KEY / LLM_API_KEY，绝不能入库。
+# 注意 .env.bak-embedding 这类带后缀的备份不会被 *.bak 匹配到，必须单独写。
+.env.bak*
