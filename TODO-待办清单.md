@@ -86,13 +86,52 @@ LIKE   hitRate=0.4500  recall=0.4500  mrr=0.4500
 
 ---
 
-## 四、环境状态（离开时）
+## 四、排查"降级检索"时新发现的两项（`fc550ef` 未覆盖）
+
+### 4.1 MimirQ 出错时返回 `application/octet-stream`，导致报错看不懂
+
+MimirQ 失败（如 503）时，响应的 `Content-Type` 是 `application/octet-stream` 而不是 JSON。
+Spring 的 RestClient 因此无法把它转成 String，抛出的是：
+
+```
+RestClientException: Error while extracting response for type [java.lang.String]
+  and content type [application/octet-stream]
+```
+
+而不是干净的 HTTP 状态码。**这行日志完全掩盖了真实原因**（服务返回了 503），
+`/rag/health` 里的 `lastFailure` 也因为它被截断而更难读。
+
+- [ ] 改进 `MimirQClient`：区分"HTTP 非 2xx"与"响应体解析失败"两种情况，
+      把状态码如实写进异常消息（必要时用 `onStatus` 自己接管，不依赖默认的消息转换器）
+- [ ] `health()` 的 `lastFailure` 保留完整信息（现在前端/接口拿到的被截断）
+
+### 4.2 MimirQ lite 栈是**单** uvicorn worker，一个慢请求会阻塞其它请求
+
+`docker-compose.lite.yml` 里 `UVICORN_WORKERS: ${BACKEND_WORKERS:-1}`。
+实测冷加载模型时（未离线化前 18~92 秒）**所有并发请求一起挂住** ——
+单 worker 的阻塞式加载把整个服务堵死，这也是 503 的直接来源之一。
+
+- [ ] 视机器内存把 `BACKEND_WORKERS` 提到 2（每个 worker 自带一份模型，内存约 +1GB）
+- [ ] 或在文档中明确记录"lite 栈只适合单用户/演示，不要压并发"
+
+### 4.3 冷加载仍有 ~2.9 秒（已缓解，未消除）
+
+离线化之后首次检索仍需 ~2.9 秒（模型加载），而 Java 侧读超时是 5 秒 —— 余量不大，
+机器繁忙时仍可能超时降级。已在 `start.ps1` 加预热把它挪到启动阶段。
+
+- [ ] 若出现偶发降级，把 `mimirq.timeout` 提到 10s（用 `MIMIRQ_TIMEOUT` 覆盖即可）
+- [ ] 注意：**服务真的挂掉时是"连接被拒"，走的是 1.5s 连接超时，不会等 10s**，
+      所以放宽读超时的实际代价很小
+
+---
+
+## 五、环境状态（离开时）
 
 | 项 | 状态 |
 |---|---|
-| 我的测试后端 | **8081 上运行中**（后台任务 `pwsh-1`，已开 MimirQ） |
-| MimirQ | 容器健康，监听 8000 |
-| 你的实例 | 8080 未启动 |
+| 我的测试后端 | 已停止（8081 无监听） |
+| MimirQ | 容器健康，监听 8000，已启用 `HF_HUB_OFFLINE=1` |
+| 你的实例 | 8080 运行中（未被我改动过），搜索正常：131~229ms、`degraded=false`、`strategy=MIMIRQ` |
 | 数据库 | `employee1` 密码 `admin123`；临时角色 `ROLE_ZZ_LIMITED` 与用户 `zz_limited` **已删除**；用户表为 1/4/5，角色菜单数 8/15/28 |
 | 遗留数据 | `employee1` 的邮箱/手机号在测试中被改成 `emp1.new@company.com` / `13900001111`（如需还原请说） |
 | 测试日志 | `trainer-eval-server/logs/backend-*.log` 多份 |
