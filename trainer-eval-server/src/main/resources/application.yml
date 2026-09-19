@@ -67,6 +67,14 @@ agent:
     # 单工具反思重试上限（P0.3）。只对"参数可调"的检索工具生效：
     # 成绩/错题类工具为空是"确实没数据"，重试只会白烧 token。
     max-tool-retries: 2
+  # 多智能体协作（POST /api/v1/agent/chat/stream 带 mode=multi 时生效）
+  # 三个角色各是一次完整模型调用，因此成本约为单智能体的 3~4 倍；
+  # 换来的是"用独立上下文复核证据"，适合复杂/高风险的问答场景。
+  multi:
+    # 资料员的工具循环轮次上限。比单智能体低：多智能体的重点是分工，不是更深的检索
+    max-research-iterations: 4
+    history-window: 10
+    history-ttl-hours: 168
 
 # 知识库服务（MimirQ）接入。对应《企业级RAG实施方案.md》阶段三 3.4。
 # 检索链路：MimirQ → 本地混合检索(ngram+子串+RRF) → 子串兜底；
@@ -131,6 +139,73 @@ rag:
 app:
   upload:
     path: D:/trainer-eval/uploads
+
+# ---------------------------------------------------------------------------
+# MCP（Model Context Protocol）外部工具接入
+# ---------------------------------------------------------------------------
+# 目的：把"给 Agent 加一个工具"从"改 Java 代码 + 发版"变成"改一行配置"。
+#
+# 安全边界（三选一必须明确，否则不要开）：
+#   ① server 列表只能来自本文件 —— stdio 传输等于在本机执行命令，
+#      开放 API 动态添加 server 就等于开放远程命令执行。McpController 刻意没有增删接口。
+#   ② allowed-roles 留空 = 仅管理员。MCP 工具没有用户身份，做不到本地工具那样的行级过滤，
+#      所以默认取最保守值：把"忘记配置"的后果从"跨用户数据泄露"降级为"功能没生效"。
+#   ③ 工具结果包 <data> 标签，与课程资料同等对待（系统提示词已声明其中指令不执行）。
+#
+# 默认关闭：没配 server 时 Agent 行为与没有这个功能完全一致。
+mcp:
+  enabled: ${MCP_ENABLED:false}
+  default-timeout: 20s
+  init-timeout: 15s
+  # 所有 server 合计最多暴露多少工具（防止提示词被工具定义撑爆）
+  max-tools: 64
+  # 外部工具结果体积不可控，默认不写进链路追踪明细
+  capture-tool-result: false
+  servers:
+    # 内置演示 server：仓库自带、零依赖（纯标准库 Python），用于验证接入链路是否真的通。
+    # 起用方式：MCP_ENABLED=true MCP_DEMO_ENABLED=true，
+    # 并把 MCP_DEMO_COMMAND / MCP_DEMO_SCRIPT 指向本机 python 与本仓库脚本。
+    demo:
+      enabled: ${MCP_DEMO_ENABLED:false}
+      transport: stdio
+      command: ${MCP_DEMO_COMMAND:python}
+      args:
+        - ${MCP_DEMO_SCRIPT:./mcp-demo-server/demo_mcp_server.py}
+      description: 内置演示 MCP server（企业培训制度库 + 人时计算），用于验证 MCP 接入链路
+      tool-prefix: "mcp_demo_"
+      # 演示用：只给管理员。要让内训师也能用就改成 [MANAGER, TRAINER]
+      allowed-roles:
+        - MANAGER
+
+# ---------------------------------------------------------------------------
+# LLM/RAG/Agent 链路追踪（可观测性）
+# ---------------------------------------------------------------------------
+# 两段式设计，互不依赖：
+#   ① 本地表 ai_trace —— 永远是主路径，不依赖任何外部服务，管理端"链路追踪"页直接查
+#   ② Langfuse 导出  —— 可选，配了才发；异步、失败不影响业务
+#
+# 为什么默认走 otlp 而不是 /api/public/ingestion：
+#   查 Langfuse 官方契约（fern/apis/server/definition/ingestion.yml）确认，
+#   老的批次接口已 deprecated，Langfuse Cloud 自 2026-11-16 起只接受 score-create，
+#   官方替代路径就是 POST /api/public/otel/v1/traces。
+#   若自托管版本 < v3.22.0（没有 OTLP 端点），把 mode 改成 legacy 回退。
+langfuse:
+  enabled: ${LANGFUSE_ENABLED:false}
+  host: ${LANGFUSE_HOST:http://localhost:3000}
+  public-key: ${LANGFUSE_PUBLIC_KEY:}
+  secret-key: ${LANGFUSE_SECRET_KEY:}
+  mode: ${LANGFUSE_MODE:otlp}
+  environment: ${LANGFUSE_ENVIRONMENT:dev}
+  release: ${LANGFUSE_RELEASE:}
+  service-name: trainer-eval
+  # Agent 流量不高，默认全采；压测或量大时再调低
+  sample-rate: ${LANGFUSE_SAMPLE_RATE:1.0}
+  # 是否记录完整提示词与回答。合规敏感场景设 false，只留长度与摘要
+  capture-content: ${LANGFUSE_CAPTURE_CONTENT:true}
+  max-text-length: 4000
+  timeout: 5s
+  queue-capacity: 2000
+  batch-size: 20
 
 ---
 spring:

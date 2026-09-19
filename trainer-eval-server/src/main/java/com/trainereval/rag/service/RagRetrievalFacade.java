@@ -2,6 +2,8 @@ package com.trainereval.rag.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.trainereval.observability.Observation;
+import com.trainereval.observability.Observability;
 import com.trainereval.rag.dto.RetrievalHit;
 import com.trainereval.rag.entity.RagRetrievalTrace;
 import com.trainereval.rag.mapper.RagRetrievalTraceMapper;
@@ -66,6 +68,7 @@ public class RagRetrievalFacade {
     private final TraCourseMapper courseMapper;
     private final RagRetrievalTraceMapper traceMapper;
     private final ObjectMapper objectMapper;
+    private final Observability observability;
 
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private volatile long openUntilMillis = 0L;
@@ -80,6 +83,45 @@ public class RagRetrievalFacade {
     }
 
     public RagResult search(Long userId, String sessionId, String query, Long requestedCourseId, int topK) {
+        // 检索是整条链路里最容易变慢的一跳（要跨进程问 MimirQ），所以单独挂一个 retriever span：
+        // 这样在链路时间线上能一眼看出"这次回答的 3 秒里有 2.8 秒花在检索上"。
+        // 没有活跃链路时 retrieverSpan 会返回一个游离 span，纯空操作，不会 NPE。
+        Observation span = observability.retrieverSpan("rag.search", Map.of(
+                "query", query == null ? "" : query,
+                "topK", topK,
+                "requestedCourseId", requestedCourseId == null ? "" : String.valueOf(requestedCourseId),
+                "userId", userId == null ? "" : String.valueOf(userId)));
+        try {
+            RagResult result = doSearch(userId, sessionId, query, requestedCourseId, topK);
+            span.metadata("backend", result.backend())
+                    .metadata("degraded", result.degraded())
+                    .metadata("hitCount", result.hits().size());
+            if (result.note() != null) {
+                span.metadata("note", result.note());
+            }
+            span.end(topHits(result));
+            return result;
+        } catch (RuntimeException e) {
+            span.error(e.getClass().getSimpleName() + ": " + e.getMessage());
+            throw e;
+        }
+    }
+
+    /** 链路里只留"命中了什么、多相关"，不留全文——全文在 rag_chunk 里，重复存没有意义。 */
+    private List<Map<String, Object>> topHits(RagResult result) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (RetrievalHit hit : result.hits()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("citation", hit.citation());
+            row.put("title", hit.title());
+            row.put("score", Math.round(hit.score() * 10000) / 10000.0);
+            row.put("matchedBy", hit.channels());
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private RagResult doSearch(Long userId, String sessionId, String query, Long requestedCourseId, int topK) {
         long start = System.currentTimeMillis();
 
         KnowledgeAccessService.AccessScope scope = accessService.resolve(userId, requestedCourseId);

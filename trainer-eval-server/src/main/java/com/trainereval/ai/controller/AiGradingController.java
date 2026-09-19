@@ -7,6 +7,7 @@ import com.trainereval.ai.entity.AiGradingLog;
 import com.trainereval.ai.entity.AiGradingRule;
 import com.trainereval.ai.mapper.AiGradingLogMapper;
 import com.trainereval.ai.mapper.AiGradingRuleMapper;
+import com.trainereval.ai.service.AiGradingConsistencyService;
 import com.trainereval.common.result.PageResult;
 import com.trainereval.common.result.R;
 import jakarta.validation.Valid;
@@ -38,6 +39,22 @@ public class AiGradingController {
 
     @Autowired
     private AiGradingLogMapper logMapper;
+
+    @Autowired
+    private AiGradingConsistencyService consistencyService;
+
+    /**
+     * AI 评分与教师评分的一致性报告。
+     * <p>
+     * 回答的是可决策的问题："AI 评分能不能先自动给分、教师只复核？"
+     * 给出 Pearson、MAE/RMSE、系统性偏差、各容差一致率，以及偏离最大的样本清单。
+     */
+    @GetMapping("/grading-consistency")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> gradingConsistency(
+            @RequestParam(required = false) Integer sinceDays) {
+        return R.ok(consistencyService.report(sinceDays));
+    }
 
     @GetMapping("/rules")
     @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")

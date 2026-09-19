@@ -2,14 +2,23 @@ import { getToken } from '@/utils/auth'
 
 /**
  * 学习辅导 Agent 的 SSE 流式请求。
- * onEvent(eventName, dataObj) 会依次收到：
- *   tool_call  {iteration, name, arguments}
+ *
+ * mode='single'（默认，单智能体）会依次收到：
+ *   plan {steps, finalized?} / step_status {index, title, status}
+ *   tool_call {iteration, name, arguments}
  *   tool_result {name, preview}
- *   delta      {text}
- *   done       {sessionId, length}
- *   error      {message}
+ *   reflection {tool, reason, retrying, attempt}
+ *   citation {sources}
+ *   delta {text} / done {sessionId, length} / error {message}
+ *
+ * mode='multi'（多智能体：资料员 → 复核员 → 汇报员）额外收到：
+ *   multi_start {roles:[{key,label,duty}]}
+ *   role_start {role, label}
+ *   role_done  {role, label, latencyMs, note?}
+ *   文本仍走 role_delta {role, text}（按角色区分，便于前端分区渲染）
+ *   tool_call / tool_result 带 role 字段
  */
-export function streamAgentChat({ sessionId, message, onEvent, onError, signal }) {
+export function streamAgentChat({ sessionId, message, mode = 'single', onEvent, onError, signal }) {
   return fetch('/api/v1/agent/chat/stream', {
     method: 'POST',
     headers: {
@@ -17,7 +26,7 @@ export function streamAgentChat({ sessionId, message, onEvent, onError, signal }
       Authorization: `Bearer ${getToken()}`,
       Accept: 'text/event-stream'
     },
-    body: JSON.stringify({ sessionId, message }),
+    body: JSON.stringify({ sessionId, message, mode }),
     signal
   }).then(async response => {
     if (!response.ok || !response.body) {

@@ -103,6 +103,54 @@ public class RagAdminController {
         return R.ok(knowledgeBaseSyncService.status());
     }
 
+    /**
+     * 漂移巡检：逐课程逐条核对"本地应有"与"知识库实有"，列出缺失与多余的文档。
+     * <p>
+     * 与 {@code /knowledge-base/status} 的分工：那个给总数（"哪门课数量不对"），
+     * 这个给明细（"缺的是哪一份、多的是哪一份"）。
+     * 数量相等但内容不同（改名/改归属留下的幽灵文档）只有这个接口能发现。
+     */
+    @GetMapping("/knowledge-base/drift")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> knowledgeBaseDrift() {
+        return R.ok(knowledgeBaseSyncService.drift());
+    }
+
+    /** 某课程在知识库里的实际文档清单（只读，不会顺手把库建出来）。 */
+    @GetMapping("/knowledge-base/documents")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> knowledgeBaseDocuments(@RequestParam Long courseId) {
+        return R.ok(knowledgeBaseSyncService.documents(courseId));
+    }
+
+    /**
+     * 资料级同步状态清单 —— 知识库管理页主表格的数据源。
+     * 把 tra_material 与 MimirQ 文档列表在服务端做 join，"是否已灌入"只有服务端知道。
+     */
+    @GetMapping("/knowledge-base/materials")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> knowledgeBaseMaterials(
+            @RequestParam(required = false) Long courseId,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "200") int limit) {
+        return R.ok(knowledgeBaseSyncService.materials(courseId, keyword, limit));
+    }
+
+    /**
+     * 单条资料重推。
+     * <p>
+     * 比全量重推便宜得多，也更安全：全量是"每份先删后建"，中途失败会留下半灌状态；
+     * 而真实场景里最常发生的只是"我刚改的那一份没生效"。
+     */
+    @PostMapping("/knowledge-base/resync/{materialId}")
+    @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")
+    public R<Map<String, Object>> resyncMaterial(@PathVariable Long materialId) {
+        Map<String, Object> result = knowledgeBaseSyncService.resyncMaterial(materialId);
+        return Boolean.TRUE.equals(result.get("ok"))
+                ? R.ok("资料已重新灌入知识库", result)
+                : R.error(String.valueOf(result.getOrDefault("message", "重推失败")));
+    }
+
     /** 预览某个资料的切块效果（不落库），用于调切块参数。 */
     @GetMapping("/chunks/preview")
     @PreAuthorize("hasAnyRole('TRAINER','MANAGER')")

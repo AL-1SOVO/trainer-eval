@@ -189,6 +189,81 @@ public class MimirQIngestClient {
         return result;
     }
 
+    /**
+     * 只读地找 dataset，<b>不存在就返回 null（不建库）</b>。
+     * <p>
+     * 与 {@link #resolveDatasetId} 的区别是"读"和"写"的语义不能混：
+     * 巡检/漂移检查只是想知道知识库里有什么，如果顺手把库建出来，
+     * 会让"某课程资料根本没灌进去"这个真实问题被一个空库掩盖过去。
+     */
+    public String findDatasetId(Long courseId) {
+        if (!isConfigured() || courseId == null) {
+            return null;
+        }
+        String name = properties.knowledgeIdFor(courseId);
+        JsonNode root = getJson(properties.getDatasetsPath() + "/?page=1&page_size=200");
+        for (JsonNode item : root.path("items")) {
+            if (name.equals(item.path("name").asText(""))) {
+                String id = item.path("id").asText("");
+                if (!id.isBlank()) {
+                    datasetCache.put(courseId, id);
+                    return id;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 列出某课程在知识库里的实际文档（不建库）。
+     * <p>
+     * 这是"漏灌"与"多灌"的唯一事实来源：本地期望值来自 tra_material，
+     * 服务端事实只能问 MimirQ。两者对比才有意义。
+     * <p>
+     * <b>分页是必需的，不是优化</b>：MimirQ 的文档列表接口把 limit 约束在
+     * {@code ge=1, le=200}（见 document_listing.py 的 ListDocumentsQueryFields），
+     * 传 500 会直接得到 422 VALIDATION_ERROR —— 这是实测踩到的，
+     * 所以这里用 skip/limit 翻页，语料变大也不会漏读。
+     */
+    public List<Map<String, Object>> listDocuments(Long courseId) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (!isConfigured()) {
+            return result;
+        }
+        String datasetId = findDatasetId(courseId);
+        if (datasetId == null) {
+            return result;
+        }
+        // MimirQ 的上限就是 200；写成更大的值会 422
+        final int pageSize = 200;
+        // 防呆：即便上游返回异常分页也不要无限循环（25 × 200 = 5000 份文档）
+        final int maxPages = 25;
+
+        int skip = 0;
+        for (int page = 0; page < maxPages; page++) {
+            JsonNode root = getJson(properties.getDocumentsPath()
+                    + "/?dataset_id=" + datasetId + "&limit=" + pageSize + "&skip=" + skip);
+            JsonNode items = root.path("items");
+            if (!items.isArray() || items.isEmpty()) {
+                break;
+            }
+            for (JsonNode item : items) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("documentId", item.path("id").asText(""));
+                row.put("filename", item.path("filename").asText(""));
+                row.put("status", item.path("status").asText(""));
+                row.put("chunks", item.path("chunk_count").asInt(0));
+                row.put("materialId", MimirQDocumentNaming.parseMaterialId(item.path("filename").asText("")));
+                result.add(row);
+            }
+            if (items.size() < pageSize) {
+                break;
+            }
+            skip += pageSize;
+        }
+        return result;
+    }
+
     /** 按名字 {@code course-{courseId}} 找 dataset，找不到就建一个。 */
     private String resolveDatasetId(Long courseId) {
         if (courseId == null) {

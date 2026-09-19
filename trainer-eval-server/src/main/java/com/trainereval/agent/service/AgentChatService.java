@@ -7,6 +7,10 @@ import com.trainereval.agent.mapper.AgentMessageMapper;
 import com.trainereval.agent.tools.TutorTools;
 import com.trainereval.exam.mapper.ExExamRecordMapper;
 import com.trainereval.exam.mapper.ExWrongAnswerAnalysisMapper;
+import com.trainereval.mcp.McpToolRegistry;
+import com.trainereval.observability.LlmTrace;
+import com.trainereval.observability.Observability;
+import com.trainereval.observability.Observation;
 import com.trainereval.questionbank.mapper.QbQuestionMapper;
 import com.trainereval.rag.mapper.RagChunkMapper;
 import com.trainereval.rag.service.AgentGuard;
@@ -98,6 +102,11 @@ public class AgentChatService {
     private AgentPlanner planner;
     @Autowired
     private AgentReflection reflection;
+    @Autowired
+    private Observability observability;
+    /** MCP 外部工具：未配置任何 server 时返回空数组，行为与"没有这个功能"完全一致。 */
+    @Autowired
+    private McpToolRegistry mcpToolRegistry;
 
     @Value("${agent.tutor.max-iterations:6}")
     private int maxIterations;
@@ -106,7 +115,7 @@ public class AgentChatService {
     @Value("${agent.tutor.history-ttl-hours:168}")
     private int historyTtlHours;
 
-    public void chat(Long userId, String sessionId, String userMessage, SseEmitter emitter) {
+    public void chat(Long userId, List<String> roles, String sessionId, String userMessage, SseEmitter emitter) {
         // 输入护栏：明确的提示词注入、索取成绩/答案的意图，在进入模型之前就拦掉
         String rejection = guard.checkInput(userMessage);
         if (rejection != null) {
@@ -114,6 +123,22 @@ public class AgentChatService {
             emitter.complete();
             return;
         }
+        // 整轮对话一条链路：规划、每一轮模型调用、每次工具、以及工具内部的检索
+        // 都会挂在这条 trace 下。close() 时才落库 + 导出，写成 try-with-resources 保证不漏。
+        try (LlmTrace trace = observability.startTrace(
+                Observability.TRACE_AGENT_CHAT, userId, sessionId, userMessage)) {
+            observability.attach(trace);
+            trace.tag("tutor-agent");
+            try {
+                doChat(userId, roles, sessionId, userMessage, emitter, trace);
+            } finally {
+                observability.detach();
+            }
+        }
+    }
+
+    private void doChat(Long userId, List<String> roles, String sessionId, String userMessage,
+                        SseEmitter emitter, LlmTrace trace) {
         try {
             List<Message> history = loadHistory(userId, sessionId);
             persist("user", sessionId, userId, userMessage, null, null, null);
@@ -131,8 +156,13 @@ public class AgentChatService {
                 send(emitter, "plan", Map.of("steps", planPayload(plan)));
             }
 
+            // 工具集合 = 本地业务工具（强权限过滤） + 外部 MCP 工具（运维按需接入）。
+            // MCP 未配置时 mcpToolRegistry.callbacks() 返回空数组，行为与没有这段代码一致。
+            var toolCallbacks = new ArrayList<>(List.of(ToolCallbacks.from(tools)));
+            toolCallbacks.addAll(mcpToolRegistry.callbacks(roles));
+
             OpenAiChatOptions toolOptions = OpenAiChatOptions.builder()
-                    .toolCallbacks(ToolCallbacks.from(tools))
+                    .toolCallbacks(toolCallbacks)
                     .internalToolExecutionEnabled(false)
                     .build();
 
@@ -147,7 +177,7 @@ public class AgentChatService {
             messages.add(new UserMessage(userMessage));
 
             Prompt prompt = new Prompt(messages, toolOptions);
-            ChatResponse response = chatModel.call(prompt);
+            ChatResponse response = callModel(prompt, trace, "plan-and-act");
 
             // 本次请求内每个工具的重试次数，用于限制"反思重试"不变成打转
             Map<String, Integer> retryCounts = new HashMap<>();
@@ -218,7 +248,7 @@ public class AgentChatService {
                     nextHistory.add(new SystemMessage(nudge));
                 }
                 prompt = new Prompt(nextHistory, toolOptions);
-                response = chatModel.call(prompt);
+                response = callModel(prompt, trace, "iteration-" + iteration);
             }
 
             // 收尾：把仍处于 PENDING/RUNNING 的步骤标记掉，避免前端永远显示"进行中"。
@@ -229,6 +259,7 @@ public class AgentChatService {
             persistPlan(userId, sessionId, plan);
 
             if (!answered) {
+                trace.warn("工具调用次数超出上限（maxIterations=" + maxIterations + "）");
                 send(emitter, "error", Map.of("message", "工具调用次数超出上限，请缩小问题范围后重试"));
                 emitter.complete();
                 return;
@@ -262,13 +293,82 @@ public class AgentChatService {
 
             persist("assistant", sessionId, userId, finalAnswer, null, null, null);
             appendHistory(userId, sessionId, userMessage, finalAnswer);
+            trace.output(finalAnswer);
             send(emitter, "done", Map.of("sessionId", sessionId, "length", finalAnswer.length()));
             emitter.complete();
         } catch (Exception e) {
+            // 异常链路恰恰是最需要被看到的：记进 trace 再抛给用户一句人话
+            trace.error(e.getClass().getSimpleName() + ": " + e.getMessage());
             log.error("Agent chat failed: session={}, user={}", sessionId, userId, e);
             send(emitter, "error", Map.of("message", "学习助手暂时不可用，请稍后重试"));
             emitter.complete();
         }
+    }
+
+    /**
+     * 一次模型调用的统一入口：套 generation span 记下模型名、耗时与 token。
+     *
+     * <p>为什么 token 一定要在这里取：Spring AI 的 {@code ChatResponse.getMetadata().getUsage()}
+     * 是唯一可靠来源，模型返回里没有 usage 时它给 0。放到上层再统计就只能看总数，
+     * 无法回答"是规划那一次贵，还是第 3 轮重试贵"。
+     */
+    private ChatResponse callModel(Prompt prompt, LlmTrace trace, String label) {
+        try (Observation generation = trace.generation(label, null, promptSummary(prompt))) {
+            ChatResponse response = chatModel.call(prompt);
+            if (response != null && response.getMetadata() != null) {
+                var usage = response.getMetadata().getUsage();
+                if (usage != null) {
+                    generation.usage(usage.getPromptTokens(), usage.getCompletionTokens());
+                }
+                generation.model(response.getMetadata().getModel());
+            }
+            generation.end(responseSummary(response));
+            return response;
+        } catch (RuntimeException e) {
+            // 这里不再往外抛之前先记异常：否则链路里只看到"这一跳没结束"，看不出是超时还是 401
+            throw e;
+        }
+    }
+
+    /** 提示词摘要只留"几条消息 + 总字数 + 最后一条用户消息"，全文太大且含历史噪声。 */
+    private Map<String, Object> promptSummary(Prompt prompt) {
+        List<Message> instructions = prompt.getInstructions();
+        int chars = 0;
+        String lastUser = null;
+        for (Message message : instructions) {
+            String text = message.getText();
+            if (text != null) {
+                chars += text.length();
+            }
+            if (message instanceof UserMessage && text != null) {
+                lastUser = text;
+            }
+        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("messageCount", instructions.size());
+        summary.put("totalChars", chars);
+        if (lastUser != null) {
+            summary.put("lastUserMessage", lastUser.length() > 500 ? lastUser.substring(0, 500) + "…" : lastUser);
+        }
+        return summary;
+    }
+
+    private Map<String, Object> responseSummary(ChatResponse response) {
+        if (response == null || response.getResults() == null || response.getResults().isEmpty()) {
+            return Map.of("empty", true);
+        }
+        String text = response.getResult().getOutput().getText();
+        List<AssistantMessage.ToolCall> calls = response.getResult().getOutput().getToolCalls();
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("textChars", text == null ? 0 : text.length());
+        if (calls != null && !calls.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (AssistantMessage.ToolCall call : calls) {
+                names.add(call.name());
+            }
+            summary.put("toolCalls", names);
+        }
+        return summary;
     }
 
     @SuppressWarnings("unchecked")

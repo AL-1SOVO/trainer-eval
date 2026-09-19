@@ -44,7 +44,11 @@ const routes = [
       { path: 'paper-editor/:id?', name: 'PaperEditor', component: () => import('@/views/trainer/paper/PaperEditor.vue'), meta: { title: '试卷编辑' } },
       { path: 'grading', name: 'GradingQueue', component: () => import('@/views/trainer/grading/GradingQueue.vue'), meta: { title: '阅卷中心' } },
       { path: 'grading/:recordId', name: 'GradingDetail', component: () => import('@/views/trainer/grading/GradingDetail.vue'), meta: { title: '阅卷详情' } },
-      { path: 'ai-config', name: 'AiRuleConfig', component: () => import('@/views/trainer/aiconfig/AiRuleConfig.vue'), meta: { title: 'AI评分配置' } }
+      { path: 'ai-config', name: 'AiRuleConfig', component: () => import('@/views/trainer/aiconfig/AiRuleConfig.vue'), meta: { title: 'AI评分配置' } },
+      // 内训师也要能管自己课程的知识库：文档本来就是内训师上传的，
+      // 出了"传了但员工搜不到"的问题时，最该能自查的就是他。
+      // 与管理员门户共用同一个组件，避免两份实现各自漂移。
+      { path: 'knowledge', name: 'TrainerKnowledgeBase', component: () => import('@/views/manager/knowledge/KnowledgeBase.vue'), meta: { title: '知识库管理' } }
     ]
   },
   {
@@ -61,7 +65,13 @@ const routes = [
       { path: 'training', alias: 'all-courses', name: 'AllCourses', component: () => import('@/views/manager/training/AllCourses.vue'), meta: { title: '培训监管' } },
       { path: 'exam-stats', name: 'ExamStats', component: () => import('@/views/manager/exam/ExamStats.vue'), meta: { title: '考试统计' } },
       { path: 'reports', name: 'ReportGenerate', component: () => import('@/views/manager/report/ReportGenerate.vue'), meta: { title: '报表中心' } },
-      { path: 'ai-logs', name: 'AiGradingLog', component: () => import('@/views/manager/log/AiGradingLog.vue'), meta: { title: 'AI评分日志' } }
+      { path: 'ai-logs', name: 'AiGradingLog', component: () => import('@/views/manager/log/AiGradingLog.vue'), meta: { title: 'AI评分日志' } },
+      // RAG 运维：知识库里到底有什么、有没有漏灌、检索为什么没召回
+      { path: 'knowledge', name: 'KnowledgeBaseManage', component: () => import('@/views/manager/knowledge/KnowledgeBase.vue'), meta: { title: '知识库管理' } },
+      // 可观测性：一次请求内部的完整链路（模型调用 / 检索 / 工具各自耗时与 token）
+      { path: 'traces', name: 'TraceList', component: () => import('@/views/manager/observability/TraceList.vue'), meta: { title: '链路追踪' } },
+      // MCP 外部工具接入
+      { path: 'mcp', name: 'McpManage', component: () => import('@/views/manager/mcp/McpManage.vue'), meta: { title: 'MCP 工具接入' } }
     ]
   },
   {

@@ -9,6 +9,9 @@
         </el-select>
         <el-button type="primary" @click="fetchData">查询</el-button>
       </div>
+      <el-button :loading="consistencyLoading" @click="loadConsistency">
+        AI 与教师评分一致性
+      </el-button>
     </div>
     <div class="table-container">
       <el-table :data="logs" v-loading="loading">
@@ -72,6 +75,89 @@
         <p v-if="current.reasoning" style="color:#334155;line-height:1.8">{{ current.reasoning }}</p>
       </template>
     </el-drawer>
+
+    <el-dialog v-model="consistencyVisible" title="AI 评分与教师评分一致性" width="76%">
+      <template v-if="consistency">
+        <el-alert
+          v-if="!consistency.available"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="consistency.message"
+        />
+        <template v-else>
+          <el-space style="margin-bottom: 12px">
+            <span class="muted">统计区间：</span>
+            <el-select v-model="consistencyDays" clearable placeholder="全部" style="width: 150px" @change="loadConsistency">
+              <el-option label="近 7 天" :value="7" />
+              <el-option label="近 30 天" :value="30" />
+              <el-option label="近 90 天" :value="90" />
+            </el-select>
+            <el-tag type="info">样本 {{ consistency.sampleSize }} 条</el-tag>
+          </el-space>
+
+          <el-alert
+            v-if="consistency.sampleWarning"
+            type="warning"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 12px"
+            :title="consistency.sampleWarning"
+          />
+
+          <el-row :gutter="12" style="margin-bottom: 12px">
+            <el-col :span="4">
+              <el-card shadow="never">
+                <!--
+                  相关系数在"样本不足"或"某一侧无方差"时是【无定义】，不是 0。
+                  渲染成 0.000 会被读成"完全无关"，与下面的说明自相矛盾 ——
+                  宁可显示"—"，也不显示一个会误导人的数字。
+                -->
+                <el-statistic v-if="consistency.pearson != null" title="Pearson" :value="consistency.pearson" :precision="3" />
+                <div v-else class="stat-na">
+                  <div class="stat-na-title">Pearson</div>
+                  <div class="stat-na-value">—</div>
+                </div>
+              </el-card>
+            </el-col>
+            <el-col :span="4"><el-card shadow="never"><el-statistic title="MAE" :value="consistency.summary.mae" :precision="3" /></el-card></el-col>
+            <el-col :span="4"><el-card shadow="never"><el-statistic title="RMSE" :value="consistency.summary.rmse" :precision="3" /></el-card></el-col>
+            <el-col :span="4"><el-card shadow="never"><el-statistic title="平均偏差" :value="consistency.summary.meanBias" :precision="3" /></el-card></el-col>
+            <el-col :span="4"><el-card shadow="never"><el-statistic title="±10% 一致率" :value="consistency.summary.within10PercentRate * 100" :precision="1" suffix="%" /></el-card></el-col>
+            <el-col :span="4"><el-card shadow="never"><el-statistic title="±20% 一致率" :value="consistency.summary.within20PercentRate * 100" :precision="1" suffix="%" /></el-card></el-col>
+          </el-row>
+
+          <el-descriptions :column="1" border size="small" style="margin-bottom: 12px">
+            <el-descriptions-item label="指标含义">{{ consistency.metricDefinition }}</el-descriptions-item>
+            <el-descriptions-item label="偏差倾向">{{ consistency.summary.biasDirection }}</el-descriptions-item>
+            <el-descriptions-item label="一致度解读">{{ consistency.interpretation || consistency.pearsonNote }}</el-descriptions-item>
+            <el-descriptions-item label="决策建议">{{ consistency.decisionHint }}</el-descriptions-item>
+          </el-descriptions>
+
+          <el-divider content-position="left">偏离最大的样本（复核时优先看这些）</el-divider>
+          <el-table :data="consistency.outliers || []" size="small" style="margin-bottom: 12px">
+            <el-table-column prop="answerId" label="答题ID" width="90" />
+            <el-table-column prop="questionType" label="题型" width="110" />
+            <el-table-column prop="fullScore" label="满分" width="80" />
+            <el-table-column prop="aiScore" label="AI 分" width="80" />
+            <el-table-column prop="manualScore" label="教师分" width="90" />
+            <el-table-column prop="diff" label="差值(AI-教师)" width="120" />
+          </el-table>
+
+          <el-divider content-position="left">按题型拆分</el-divider>
+          <el-table :data="Object.entries(consistency.byQuestionType || {}).map(([k, v]) => ({ type: k, ...v }))" size="small">
+            <el-table-column prop="type" label="题型" width="140" />
+            <el-table-column prop="sampleSize" label="样本" width="80" />
+            <el-table-column prop="mae" label="MAE" width="100" />
+            <el-table-column prop="meanBias" label="平均偏差" width="110" />
+            <el-table-column label="±10% 一致率" width="130">
+              <template #default="{ row }">{{ rateText(row.within10PercentRate) }}</template>
+            </el-table-column>
+          </el-table>
+        </template>
+      </template>
+      <el-empty v-else description="正在加载" />
+    </el-dialog>
   </div>
 </template>
 
@@ -86,6 +172,31 @@ const total = ref(0)
 const query = reactive({ page: 1, size: 10, status: '' })
 const drawerVisible = ref(false)
 const current = ref(null)
+
+// ---- AI 与教师评分一致性 ----
+// 回答的是一个可决策的问题："AI 评分能不能先自动给分、教师只复核？"
+const consistencyVisible = ref(false)
+const consistency = ref(null)
+const consistencyLoading = ref(false)
+const consistencyDays = ref(null)
+
+async function loadConsistency() {
+  consistencyLoading.value = true
+  try {
+    consistency.value = await request.get('/ai/grading-consistency', {
+      params: { sinceDays: consistencyDays.value || undefined }
+    })
+    consistencyVisible.value = true
+  } catch (e) {
+    // 拦截器已提示
+  } finally {
+    consistencyLoading.value = false
+  }
+}
+
+function rateText(value) {
+  return value == null ? '-' : `${(value * 100).toFixed(1)}%`
+}
 
 function statusText(status) {
   if (status === 'SUCCESS') return '成功'
@@ -131,5 +242,22 @@ onMounted(fetchData)
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.muted {
+  color: #909399;
+  font-size: 13px;
+}
+.stat-na {
+  text-align: center;
+}
+.stat-na-title {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 6px;
+}
+.stat-na-value {
+  font-size: 22px;
+  color: #c0c4cc;
+  line-height: 1.4;
 }
 </style>

@@ -7,7 +7,19 @@
             <div class="chat-title">AI 学习助手</div>
             <div class="chat-sub">基于你的考试成绩、错题记录和课程资料，给出个性化学习建议</div>
           </div>
-          <el-button size="small" @click="resetSession">新对话</el-button>
+          <div class="chat-header-actions">
+            <el-radio-group v-model="mode" size="small" :disabled="streaming">
+              <el-radio-button value="single">单智能体</el-radio-button>
+              <el-radio-button value="multi">多智能体协作</el-radio-button>
+            </el-radio-group>
+            <el-tooltip
+              content="多智能体：资料员负责查证、复核员用独立上下文核对证据、汇报员只基于已核实内容作答。更可靠，但耗时与成本约为单智能体的 3~4 倍。"
+              placement="bottom"
+            >
+              <el-icon class="mode-help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+            <el-button size="small" @click="resetSession">新对话</el-button>
+          </div>
         </div>
       </template>
 
@@ -30,6 +42,12 @@
             <el-tag size="small" type="warning" effect="plain">
               <el-icon><Refresh /></el-icon>
               {{ msg.label }}
+            </el-tag>
+          </div>
+          <div v-else-if="msg.role === 'agent'" class="tool-step">
+            <el-tag size="small" :type="msg.running ? 'primary' : 'success'" effect="plain">
+              <el-icon><Loading v-if="msg.running" /><CircleCheck v-else /></el-icon>
+              {{ msg.label }}{{ msg.note ? ' · ' + msg.note : '' }}
             </el-tag>
           </div>
           <div v-else-if="msg.role === 'user'" class="bubble-row user">
@@ -118,6 +136,9 @@ const bodyRef = ref(null)
 const sources = ref([])
 // 任务规划：多步任务时后端先下发步骤表，再逐步回报状态（P0.2）
 const plan = ref([])
+// 对话模式：single=单智能体（规划+工具+反思），multi=多智能体协作（资料员→复核员→汇报员）
+const mode = ref('single')
+
 let sessionId = localStorage.getItem('agent_session')
 if (!sessionId) {
   sessionId = crypto.randomUUID()
@@ -192,6 +213,34 @@ function send(preset) {
           : `${toolLabel(data.tool)} 仍无结果（${data.reason}），将如实告知`
       })
       scrollBottom()
+    } else if (event === 'multi_start') {
+      // 多智能体：先把角色分工亮出来，用户才知道"接下来看到的几段分别是谁在做什么"
+      messages.value.push({
+        role: 'agent',
+        running: false,
+        label: `多智能体协作：${(data.roles || []).map(r => `${r.label}（${r.duty}）`).join(' → ')}`
+      })
+      scrollBottom()
+    } else if (event === 'role_start') {
+      messages.value.push({ role: 'agent', running: true, agentKey: data.role, label: `${data.label}工作中…` })
+      scrollBottom()
+    } else if (event === 'role_done') {
+      const step = [...messages.value].reverse().find(m => m.role === 'agent' && m.agentKey === data.role && m.running)
+      if (step) {
+        step.running = false
+        step.label = `${data.label}完成（${data.latencyMs}ms）`
+        step.note = data.note || ''
+      }
+      scrollBottom()
+    } else if (event === 'role_delta') {
+      // 只有最终汇报文本会被流式推送；复核员的意见属于内部工作记录，不展示
+      const last = messages.value[messages.value.length - 1]
+      if (last && last.role === 'assistant' && last.streaming) {
+        last.content += data.text || ''
+      } else {
+        messages.value.push({ role: 'assistant', content: data.text || '', streaming: true })
+      }
+      scrollBottom()
     } else if (event === 'delta') {
       const last = messages.value[messages.value.length - 1]
       if (last && last.role === 'assistant' && last.streaming) {
@@ -220,6 +269,7 @@ function send(preset) {
   streamAgentChat({
     sessionId: sessionIdForUser(),
     message: text,
+    mode: mode.value,
     onEvent,
     onError: error => {
       ElMessage.error(error.message || '网络异常，请稍后重试')
@@ -258,6 +308,17 @@ function toolLabel(name) {
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+.chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-help {
+  color: #909399;
+  cursor: help;
 }
 
 .chat-card :deep(.el-card__body) {
