@@ -373,6 +373,31 @@ if (-not $SkipMimirQ -and (Test-Path $MimirQCompose) -and -not (Test-Path $Mimir
             }
             if ($mqReady) {
                 Write-Ok "MimirQ 已就绪（http://127.0.0.1:8000）"
+
+                # 预热：就绪 ≠ 热。MimirQ 的向量模型是懒加载的，第一次检索要现加载，
+                # 实测未离线化时可达 18 秒甚至更久，而 Java 侧读超时只有 5 秒 ——
+                # 结果是"启动后前几次搜索必然降级"，界面上出现"当前为降级检索"。
+                # 这里在启动阶段主动打一次检索，把冷加载的代价挪到启动流程里。
+                # 用课程 1 的 knowledge_id；失败也无所谓（模型可能已被加载或映射未配），
+                # 所以只吞掉结果、不报错、不阻塞。
+                if ($env:MIMIRQ_API_KEY) {
+                    Write-Info "正在预热知识库（首次检索需加载向量模型，请稍候）..."
+                    $warmBody = '{"knowledge_id":"course-1","query":"warmup","retrieval_setting":{"top_k":1,"score_threshold":0.0,"latency_profile":"fast"}}'
+                    $warmFile = Join-Path $env:TEMP "mimirq-warmup.json"
+                    try {
+                        [System.IO.File]::WriteAllText($warmFile, $warmBody, (New-Object System.Text.UTF8Encoding($false)))
+                        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                        & curl.exe -s -o NUL --max-time 120 -X POST `
+                            "http://127.0.0.1:8000/api/v1/integrations/dify/retrieval" `
+                            -H "Authorization: Bearer $($env:MIMIRQ_API_KEY)" `
+                            -H "Content-Type: application/json" --data-binary "@$warmFile" 2>$null | Out-Null
+                        $sw.Stop()
+                        Write-Ok "知识库预热完成（$([Math]::Round($sw.Elapsed.TotalSeconds,1))s）"
+                        Remove-Item $warmFile -Force -ErrorAction SilentlyContinue
+                    } catch {
+                        Write-Info "        预热未成功，首次搜索可能稍慢（不影响功能）"
+                    }
+                }
             } else {
                 Write-Warn2 "MimirQ 未在 180s 内就绪：本次检索走本地混合检索"
                 Write-Info "        排查：docker compose -f `"$MimirQCompose`" logs --tail 80 mimirq-api"
