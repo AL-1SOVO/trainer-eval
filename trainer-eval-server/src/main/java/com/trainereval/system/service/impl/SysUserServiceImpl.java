@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.trainereval.common.exception.BusinessException;
 import com.trainereval.common.exception.ErrorCode;
 import com.trainereval.common.result.PageResult;
+import com.trainereval.common.util.RedisUtils;
 import com.trainereval.system.dto.UserForm;
 import com.trainereval.system.dto.UserQuery;
 import com.trainereval.system.entity.SysRole;
@@ -32,6 +33,8 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
     private SysRoleMapper roleMapper;
     @Autowired
     private PasswordEncoder passwordEncoder;
+    @Autowired
+    private RedisUtils redisUtils;
 
     @Override
     public PageResult<SysUser> pageUsers(UserQuery query) {
@@ -129,6 +132,11 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
         user.setPassword(passwordEncoder.encode(
                 StringUtils.hasText(newPassword) ? newPassword : "123456"));
         baseMapper.updateById(user);
+
+        // 重置密码必须同时作废该用户**已有的会话**（token:gen 自增，与登出/自助改密同一套机制）。
+        // 否则"重置密码"在最需要它的场景下是无效的：账号被盗用时管理员重置了密码，
+        // 但攻击者手里的 access/refresh token 仍然可用 —— 重置就没起到把人踢下线的作用。
+        redisUtils.increment("token:gen:" + userId);
     }
 
     @Override
