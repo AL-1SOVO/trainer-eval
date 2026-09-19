@@ -119,9 +119,29 @@
               <h4>题目解析</h4>
               <p>{{ item.questionAnalysis }}</p>
             </div>
-            <div v-if="item.analysis?.relatedMaterialIds" class="analysis-content">
-              <h4>相关学习资源</h4>
-              <p>{{ item.analysis.relatedMaterialIds }}</p>
+            <!-- 检索到的课程资料：渲染成可点击的资料条目。
+                 原来这里直接输出 relatedMaterialIds 原文，用户看到的是 "[1]" 这种原始 JSON，
+                 既看不懂也点不进去。现在用后端解析好的 relatedMaterials（含标题与所属课程/章节）。
+
+                 标题用「检索到的」而不是「相关」：这些是检索层返回的候选资料，
+                 模型可能已判定它们与本题关系不大（例如题目问 VPN，而语料里只有数据保护原则）。
+                 叫「相关学习资源」等于把"系统找到了"说成"这些就是对的"。 -->
+            <div v-if="item.relatedMaterials?.length" class="analysis-content">
+              <h4>检索到的课程资料</h4>
+              <div class="material-links">
+                <el-tag
+                  v-for="mat in item.relatedMaterials"
+                  :key="mat.materialId"
+                  class="material-link"
+                  type="primary"
+                  effect="plain"
+                  @click="openMaterial(mat)"
+                >
+                  <el-icon><Reading /></el-icon>
+                  {{ mat.title }}
+                  <span v-if="mat.courseName" class="material-course">（{{ mat.courseName }}）</span>
+                </el-tag>
+              </div>
             </div>
 
             <div style="margin-top:12px">
@@ -150,7 +170,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { onMounted, reactive, ref, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { getUserAnalyses, getAnalysisStats, triggerAnalysis } from '@/api/exam'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
@@ -158,6 +179,17 @@ import { use } from 'echarts/core'
 import { PieChart, BarChart } from 'echarts/charts'
 import { TitleComponent, TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+
+const router = useRouter()
+
+/** 跳到资料所属课程的学习页。资料实体本身没有 courseId，后端已从章节反查补上。 */
+function openMaterial(mat) {
+  if (!mat || !mat.courseId) {
+    ElMessage.info('该资料暂未关联课程，无法跳转')
+    return
+  }
+  router.push('/employee/course-learn/' + mat.courseId)
+}
 
 use([PieChart, BarChart, TitleComponent, TooltipComponent, LegendComponent, GridComponent, CanvasRenderer])
 
@@ -321,6 +353,21 @@ onMounted(() => {
   padding: 16px;
   border-top: 1px solid #ebeef5;
 }
+.material-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.material-link {
+  cursor: pointer;
+}
+
+.material-course {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
 .analysis-content {
   margin-top: 12px;
   padding: 12px;

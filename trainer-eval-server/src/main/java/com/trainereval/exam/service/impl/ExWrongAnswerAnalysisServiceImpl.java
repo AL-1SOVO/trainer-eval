@@ -14,8 +14,13 @@ import com.trainereval.exam.mapper.ExWrongAnswerAnalysisMapper;
 import com.trainereval.exam.service.ExWrongAnswerAnalysisService;
 import com.trainereval.questionbank.entity.QbQuestion;
 import com.trainereval.questionbank.mapper.QbQuestionMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.trainereval.training.entity.TraChapter;
 import com.trainereval.training.entity.TraCourse;
+import com.trainereval.training.entity.TraMaterial;
+import com.trainereval.training.mapper.TraChapterMapper;
 import com.trainereval.training.mapper.TraCourseMapper;
+import com.trainereval.training.mapper.TraMaterialMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -34,6 +39,9 @@ public class ExWrongAnswerAnalysisServiceImpl implements ExWrongAnswerAnalysisSe
     private final ExExamRecordMapper recordMapper;
     private final QbQuestionMapper questionMapper;
     private final TraCourseMapper courseMapper;
+    private final TraMaterialMapper materialMapper;
+    private final TraChapterMapper chapterMapper;
+    private final ObjectMapper objectMapper;
     private final AiErrorAnalysisService aiErrorAnalysisService;
 
     @Override
@@ -60,6 +68,9 @@ public class ExWrongAnswerAnalysisServiceImpl implements ExWrongAnswerAnalysisSe
         List<Map<String, Object>> enriched = pageResult.getRecords().stream().map(analysis -> {
             Map<String, Object> item = new HashMap<>();
             item.put("analysis", analysis);
+            // 把 related_material_ids 解析成可展示的资料信息。
+            // 前端原来直接把它当文本渲染，用户看到的是 "[1]" 这种原始 JSON —— 既看不懂也点不了。
+            item.put("relatedMaterials", resolveRelatedMaterials(analysis.getRelatedMaterialIds()));
 
             ExExamAnswer answer = answerMapper.selectById(analysis.getAnswerId());
             if (answer != null) {
@@ -106,6 +117,63 @@ public class ExWrongAnswerAnalysisServiceImpl implements ExWrongAnswerAnalysisSe
         result.setSize(size);
         result.setTotal(pageResult.getTotal());
         result.setRecords(filtered);
+        return result;
+    }
+
+    /**
+     * 把 {@code related_material_ids}（JSON 数组）解析成前端能直接渲染的资料条目。
+     * <p>
+     * 容错要点：这个字段历史上被写入过**主题词字符串**（如 {@code ["数据加密"]}），
+     * 那是类型错位留下的脏数据。解析时只接受能转成数字的元素，其余静默跳过 ——
+     * 不能让一条历史脏数据把整个错题分析列表打挂。
+     */
+    private List<Map<String, Object>> resolveRelatedMaterials(String relatedMaterialIds) {
+        if (relatedMaterialIds == null || relatedMaterialIds.isBlank()) {
+            return List.of();
+        }
+        List<Long> ids = new ArrayList<>();
+        try {
+            List<?> raw = objectMapper.readValue(relatedMaterialIds, List.class);
+            for (Object o : raw) {
+                if (o == null) {
+                    continue;
+                }
+                if (o instanceof Number n) {
+                    ids.add(n.longValue());
+                    continue;
+                }
+                try {
+                    ids.add(Long.parseLong(String.valueOf(o).trim()));
+                } catch (NumberFormatException ignored) {
+                    // 主题词等非数字内容：跳过
+                }
+            }
+        } catch (Exception e) {
+            log.debug("related_material_ids 不是合法 JSON 数组，忽略：{}", relatedMaterialIds);
+            return List.of();
+        }
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (TraMaterial material : materialMapper.selectBatchIds(ids)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("materialId", material.getId());
+            row.put("title", material.getTitle());
+            row.put("materialType", material.getMaterialType());
+            TraChapter chapter = material.getChapterId() == null
+                    ? null : chapterMapper.selectById(material.getChapterId());
+            if (chapter != null) {
+                row.put("chapterTitle", chapter.getTitle());
+                // 前端要跳到课程学习页，所以必须带上 courseId（资料实体本身没有这个字段）
+                row.put("courseId", chapter.getCourseId());
+                TraCourse course = chapter.getCourseId() == null
+                        ? null : courseMapper.selectById(chapter.getCourseId());
+                row.put("courseName", course == null ? null : course.getCourseName());
+            }
+            result.add(row);
+        }
         return result;
     }
 

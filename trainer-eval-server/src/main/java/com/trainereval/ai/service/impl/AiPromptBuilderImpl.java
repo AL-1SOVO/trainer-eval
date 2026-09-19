@@ -44,12 +44,21 @@ public class AiPromptBuilderImpl implements AiPromptBuilder {
 
     @Override
     public String buildErrorAnalysisPrompt(ExExamAnswer answer, QbQuestion question) {
+        // 不带检索上下文时，明确告诉模型"没有资料可引用" ——
+        // 否则模板里的检索段落会变成空字符串，模型可能自行编造资料标题。
+        return buildErrorAnalysisPrompt(answer, question, "（本次未检索到相关课程资料）");
+    }
+
+    @Override
+    public String buildErrorAnalysisPrompt(ExExamAnswer answer, QbQuestion question, String retrievalContext) {
         String template = loadTemplate("error-analysis");
+        String context = notBlank(retrievalContext) ? retrievalContext : "（本次未检索到相关课程资料）";
         return fill(template, Map.of(
                 "questionContent", safe(question.getContent()),
                 "studentAnswer", safe(answer.getUserAnswer()),
                 "correctAnswer", safe(question.getReferenceAnswer()),
-                "questionAnalysis", safe(question.getAnalysis())
+                "questionAnalysis", safe(question.getAnalysis()),
+                "retrievalContext", context
         ));
     }
 
