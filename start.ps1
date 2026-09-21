@@ -41,8 +41,11 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$JavaHome = "E:\java",
-    [string]$MavenCmd = "C:\Program Files\apache-maven-3.9.9\bin\mvn.cmd",
+    # 解析顺序：显式传入 → 环境变量 JAVA_HOME → 本机默认 E:\java。
+    # 之前这里写死 E:\java，别人克隆下来必然跑不起来（而 JDK 是唯一硬性依赖）。
+    [string]$JavaHome = $(if ($env:JAVA_HOME) { $env:JAVA_HOME } else { "E:\java" }),
+    # 同理：优先用本机已知路径，找不到就留空，后面会回退到 PATH 上的 mvn。
+    [string]$MavenCmd = $(if (Test-Path "C:\Program Files\apache-maven-3.9.9\bin\mvn.cmd") { "C:\Program Files\apache-maven-3.9.9\bin\mvn.cmd" } else { "" }),
     [string]$ApiKey,
     [switch]$BackendOnly,
     [switch]$FrontendOnly,
@@ -206,11 +209,20 @@ if (-not (Test-Path $JavaExe)) {
 
 # --- Maven
 if (-not $FrontendOnly) {
-    if (Test-Path $MavenCmd) { Write-Ok "Maven（$MavenCmd）" }
-    else {
+    if ($MavenCmd -and (Test-Path $MavenCmd)) {
+        Write-Ok "Maven（$MavenCmd）"
+    } elseif (-not $MavenCmd -and (Get-Command mvn -ErrorAction SilentlyContinue)) {
+        # 没指定、也没有本机固定路径：回退到 PATH 上的 mvn（Linux/macOS 或标准安装都走这里）
+        $MavenCmd = (Get-Command mvn).Source
+        Write-Ok "Maven（$MavenCmd，来自 PATH）"
+    } else {
         $alt = "E:\IntelliJ IDEA 2024.3.5\plugins\maven\lib\maven3\bin\mvn.cmd"
         if (Test-Path $alt) { $MavenCmd = $alt; Write-Warn2 "默认 Maven 不存在，改用 IntelliJ 自带：$alt" }
-        else { Write-Err "找不到 mvn.cmd：$MavenCmd（可用 -MavenCmd 指定）"; $failed = $true }
+        else {
+            Write-Err "找不到 Maven：$MavenCmd"
+            Write-Info "可用 -MavenCmd 指定 mvn.cmd 的完整路径，或把 mvn 加入 PATH"
+            $failed = $true
+        }
     }
 }
 

@@ -81,9 +81,12 @@ const isRegister = ref(false)
 const deptOptions = ref([])
 const deptLoading = ref(false)
 
+// 刻意不预填密码：源码里写死默认口令，等于在公开仓库里公布演示账号密码。
+// 演示账号改由 README 说明（admin / admin123）。
+// 用户名保留预填只是为了少打几个字，不涉及敏感信息。
 const loginForm = reactive({
   username: 'admin',
-  password: 'admin123'
+  password: ''
 })
 
 const registerForm = reactive({
