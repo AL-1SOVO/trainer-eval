@@ -66,7 +66,7 @@ public class AiGradingServiceImpl implements AiGradingService {
             rule = new AiGradingRule();
             rule.setCourseId(record.getCourseId());
             rule.setQuestionType(question.getQuestionType());
-            rule.setModel("deepseek-v4-flash");
+            rule.setModel("deepseek-flash");
             rule.setTemperature(0.3);
             rule.setMaxTokens(4096);
             rule.setPromptTemplate(null);

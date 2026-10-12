@@ -32,7 +32,7 @@ import java.util.Map;
 public class AiGradingController {
 
     private static final String ACTIVE_STATUS = "1";
-    private static final String DEFAULT_MODEL = "deepseek-v4-flash";
+    private static final String DEFAULT_MODEL = "deepseek-flash";
 
     @Autowired
     private AiGradingRuleMapper ruleMapper;

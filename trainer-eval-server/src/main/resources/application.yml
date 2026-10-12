@@ -25,7 +25,10 @@ spring:
       base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
       chat:
         options:
-          model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+          # 修复：原默认值 deepseek-v4-flash 不是 DeepSeek 的真实模型名
+          # （实测 GET /models 只返回 deepseek-flash / deepseek-v4-pro），
+          # 此前能跑通只是被网关宽容路由到了 deepseek-flash。
+          model: ${DEEPSEEK_MODEL:deepseek-flash}
           temperature: 0.3
           max-tokens: 4096
 
@@ -49,7 +52,7 @@ jwt:
 openai:
   api-key: ${DEEPSEEK_API_KEY:${OPENAI_API_KEY:not-configured}}
   base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
-  model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+  model: ${DEEPSEEK_MODEL:deepseek-flash}
   temperature: 0.3
   max-tokens: 4096
   connect-timeout: 30s

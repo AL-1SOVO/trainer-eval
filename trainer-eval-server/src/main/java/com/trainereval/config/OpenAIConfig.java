@@ -13,7 +13,7 @@ import org.springframework.web.client.RestTemplate;
 public class OpenAIConfig {
     private String apiKey;
     private String baseUrl = "https://api.deepseek.com";
-    private String model = "deepseek-v4-flash";
+    private String model = "deepseek-flash";
     private Double temperature = 0.3;
     private Integer maxTokens = 2000;
     private String connectTimeout = "30s";
