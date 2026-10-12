@@ -298,6 +298,13 @@ trainer-eval/
 
 ## License
 
-本项目尚未声明开源许可证。如需引用请先联系作者。
+本项目作者编写的部分采用 **MIT License** —— 见根目录 [`LICENSE`](LICENSE)。
 
-（MimirQ 部分遵循其自身的 Apache-2.0 许可证。）
+Copyright (c) 2026 AL-1SOVO
+
+> ⚠️ **例外**：`mimirq/` 目录是第三方组件 [MimirQ](https://github.com/skygazer42/MimirQ) 的未修改源码快照，
+> 遵循其自身的 **Apache License 2.0**（见 [`mimirq/LICENSE`](mimirq/LICENSE) 与 [`mimirq/NOTICE`](mimirq/NOTICE)），
+> **不属于上述 MIT 授权范围**。
+>
+> 根目录 `LICENSE` 中的 MIT 条款仅适用于：`trainer-eval-server/`、`trainer-eval-web/`、
+> `mcp-demo-server/`，以及根目录的启动脚本与设计文档。
