@@ -23,6 +23,17 @@
 CHAIN  hitRate=1.0000  recall=1.0000  mrr=1.0000  misses=0  （20 题）
 LIKE   hitRate=0.4500  recall=0.4500  mrr=0.4500
 提升   +0.5500 / +0.5500 / +0.5500      延迟 2163ms
+
+> ⚠️ **2026-10-14 复测更正**：上面这段的 `LIKE_BASELINE = 0.4500`（以及"提升 +0.55"）
+> 在本仓库当前代码 + 当前 13 份教学语料下**复现不出来**。`rag_eval_run` 表里已落的评测
+> 显示基线一直是 **0.8500**，真实提升是 **+0.15**。根因是 `GoldenEvalService.likeBaselineMaterials`
+> 后来改成**先用同一套 `normalizeQuery` 清洗再做子串匹配** —— 去停用词后
+> "数据保护三大原则是什么"退化成"数据保护三大原则"，正好等于资料 3 的标题，于是直接命中。
+> 基线变强本身是**对**的（原先拿未清洗的问题去 LIKE 不公平），但文档没跟着改，
+> 于是留下了一个被夸大约 3.7 倍的提升幅度。**上面这张表保留原样作为历史记录，请勿再引用其数字。**
+> 现行口径（含 `ChunkingService` 段落切分修复后 MRR 由 1.0000 变为 0.9667 的原因）见 [README.md](README.md) 的「实测数据」一节。
+> 复现：`POST /api/v1/rag/eval?topK=5`。
+
 检索链路健康：enabled=true, circuitOpen=false  → 走的是 MimirQ，不是降级路径
 ```
 
