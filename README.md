@@ -6,6 +6,8 @@
 
 Java 21 · Spring Boot 3.4 · Spring AI · MySQL · Redis · Vue 3 · RAG · MCP · Multi-Agent
 
+[![CI](https://github.com/AL-1SOVO/trainer-eval/actions/workflows/ci.yml/badge.svg)](https://github.com/AL-1SOVO/trainer-eval/actions/workflows/ci.yml)
+
 </div>
 
 ---
