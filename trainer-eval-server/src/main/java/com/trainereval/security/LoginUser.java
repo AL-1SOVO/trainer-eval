@@ -22,7 +22,12 @@ public class LoginUser implements UserDetails {
     public Collection<? extends GrantedAuthority> getAuthorities() {
         List<GrantedAuthority> authorities = new ArrayList<>();
         if (roles != null) {
-            roles.forEach(role -> authorities.add(new SimpleGrantedAuthority(role)));
+            // Spring Security 的 hasRole('X') / hasAnyRole('X') 内部会自动补 "ROLE_" 前缀，
+            // 再去和 GrantedAuthority 做字符串比较。所以这里必须存成 ROLE_X，
+            // 否则 authorities 里是裸名 "X"，@PreAuthorize 永远匹配不上（表现为一律 403）。
+            // 注意：permissions 不参与角色判断，保持裸名（hasAuthority('sys:user:list') 风格）。
+            roles.forEach(role -> authorities.add(new SimpleGrantedAuthority(
+                    role.startsWith("ROLE_") ? role : "ROLE_" + role)));
         }
         if (permissions != null) {
             permissions.forEach(perm -> authorities.add(new SimpleGrantedAuthority(perm)));
