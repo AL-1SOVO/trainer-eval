@@ -1,0 +1,63 @@
+name: CI
+
+# 这个工作流存在的唯一目的：把「能跑」从一句自我陈述变成别人可以自己验证的事实。
+# 此前仓库里既没有自动化测试也没有 CI，而目标 JD 明确要求「可维护、可测试、可观测」——
+# 面试官打开仓库时，唯一能不经由你本人就验证的东西就是这个徽章。
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端 · Java 21 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: 执行单元测试
+        working-directory: trainer-eval-server
+        run: ./mvnw -B test
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: trainer-eval-server/target/surefire-reports/
+          if-no-files-found: ignore
+
+  frontend:
+    name: 前端 · Vite 生产构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: trainer-eval-web/package-lock.json
+
+      - name: 安装依赖
+        working-directory: trainer-eval-web
+        run: npm ci
+
+      - name: 生产构建
+        working-directory: trainer-eval-web
+        run: npm run build

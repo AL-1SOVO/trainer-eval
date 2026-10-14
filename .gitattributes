@@ -1,0 +1,22 @@
+# 行尾策略：这个仓库的开发者用 Windows，CI 跑在 Linux。
+# 本机 core.autocrlf=true 会把工作区变成 CRLF、仓库里存 LF，这对大部分文件没问题，
+# 但脚本类文件必须钉死 —— 否则 Linux 上会出现 `bad interpreter: /bin/sh^M`。
+
+# shell 脚本一律 LF
+mvnw            text eol=lf
+*.sh            text eol=lf
+
+# Windows 批处理一律 CRLF
+*.cmd           text eol=crlf
+*.bat           text eol=crlf
+
+# PowerShell 脚本用 LF（本仓库 start.ps1 / stop.ps1 已经是 LF，保持一致）
+*.ps1           text eol=lf
+
+# SQL 与 YAML 用 LF，避免 MySQL 客户端与 YAML 解析器的边界情况
+*.sql           text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# 评测题集必须逐字节稳定，否则哈希与 diff 会漂
+*.jsonl         text eol=lf
