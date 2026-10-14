@@ -49,7 +49,6 @@ public class ChunkingService {
 
     private static final Pattern HTML_TAG = Pattern.compile("<[^>]+>");
     private static final Pattern SENTENCE_SPLIT = Pattern.compile("(?<=[。！？；!?;])");
-    private static final Pattern BLANK = Pattern.compile("\\s+");
 
     /** 全量重建切块。返回处理的资料数。 */
     @Transactional
@@ -111,7 +110,15 @@ public class ChunkingService {
         if (text == null || text.isBlank()) {
             return result;
         }
-        String normalized = BLANK.matcher(text).replaceAll(" ").trim();
+        // 先统一换行符，再只折叠「行内」空白。
+        // 原实现是 normalized = BLANK.matcher(text).replaceAll(" ")，而 BLANK = \s+，
+        // 其中 \s 包含 \n —— 段落边界在进入下面的 split("\\n+") 之前就已经被吃掉，
+        // 于是 paragraphs 永远只有一个元素，「段落优先」整段分支是死代码。
+        // 后果：任何含换行的资料都被当成一个巨型段落，只能靠句子切分兜底，
+        // 段落级的语义边界完全没被利用。
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+                .replaceAll("[ \\t\\f\\x0B]+", " ")
+                .trim();
 
         // 段落优先
         List<String> paragraphs = new ArrayList<>();
